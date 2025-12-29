@@ -15,8 +15,14 @@ COPY prisma.config.ts ./
 # Install all dependencies (including devDependencies for building)
 RUN if [ -f package-lock.json ]; then npm ci; else npm install; fi
 
-# Force fresh generation with binary engine (overwrites any cached client)
-RUN npx prisma generate --schema=./prisma/schema.prisma
+# Verify schema has binary engine type, then force clean regeneration
+RUN echo "=== Verifying Prisma schema ===" && \
+    cat prisma/schema.prisma | grep -A 3 "generator client" && \
+    echo "=== Cleaning old Prisma client ===" && \
+    rm -rf node_modules/.prisma node_modules/@prisma/client && \
+    echo "=== Generating Prisma client with binary engine ===" && \
+    npx prisma generate --schema=./prisma/schema.prisma && \
+    echo "=== Verification complete ==="
 
 # Copy source code and TypeScript config
 COPY src/ ./src/
@@ -47,8 +53,14 @@ COPY prisma.config.ts ./
 RUN if [ -f package-lock.json ]; then npm ci --only=production; else npm install --only=production; fi && \
     npm cache clean --force
 
-# Force regenerate Prisma Client with binary engine (overwrites cached client - v3)
-RUN npx prisma generate --schema=./prisma/schema.prisma
+# Verify schema has binary engine type, then force clean regeneration
+RUN echo "=== Verifying Prisma schema ===" && \
+    cat prisma/schema.prisma | grep -A 3 "generator client" && \
+    echo "=== Cleaning old Prisma client ===" && \
+    rm -rf node_modules/.prisma node_modules/@prisma/client && \
+    echo "=== Generating Prisma client with binary engine ===" && \
+    npx prisma generate --schema=./prisma/schema.prisma && \
+    echo "=== Verification complete ==="
 
 # Copy built application from builder stage
 COPY --from=builder /app/dist ./dist
