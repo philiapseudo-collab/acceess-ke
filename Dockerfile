@@ -40,14 +40,15 @@ RUN addgroup --system --gid 1001 nodejs && \
 COPY package.json ./
 COPY package-lock.json* ./
 
-# Install only production dependencies
-# Use npm ci if lockfile exists, otherwise npm install
-RUN if [ -f package-lock.json ]; then npm ci --only=production; else npm install --only=production; fi && \
-    npm cache clean --force
-
-# Copy Prisma files (schema needed for client initialization)
+# Copy Prisma files BEFORE npm install (needed for postinstall script)
 COPY prisma/ ./prisma/
 COPY prisma.config.ts ./
+
+# Install only production dependencies
+# Use npm ci if lockfile exists, otherwise npm install
+# postinstall script will run prisma generate automatically
+RUN if [ -f package-lock.json ]; then npm ci --only=production; else npm install --only=production; fi && \
+    npm cache clean --force
 
 # Copy built application from builder stage
 COPY --from=builder /app/dist ./dist
