@@ -8,16 +8,14 @@ WORKDIR /app
 COPY package.json ./
 COPY package-lock.json* ./
 
-# Install all dependencies (including devDependencies for building)
-# Use npm ci if lockfile exists, otherwise npm install
-RUN if [ -f package-lock.json ]; then npm ci; else npm install; fi
-
-# Copy Prisma schema and config
+# Copy Prisma schema and config BEFORE npm install (postinstall needs them)
 COPY prisma/ ./prisma/
 COPY prisma.config.ts ./
 
-# Generate Prisma Client
-RUN npx prisma generate
+# Install all dependencies (including devDependencies for building)
+# Use npm ci if lockfile exists, otherwise npm install
+# postinstall script will run prisma generate automatically
+RUN if [ -f package-lock.json ]; then npm ci; else npm install; fi
 
 # Copy source code and TypeScript config
 COPY src/ ./src/
