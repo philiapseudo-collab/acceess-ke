@@ -8,17 +8,16 @@ WORKDIR /app
 COPY package.json ./
 COPY package-lock.json* ./
 
-# Copy Prisma schema and config BEFORE npm install (postinstall needs them)
+# Copy Prisma schema and config BEFORE npm install
 COPY prisma/ ./prisma/
 COPY prisma.config.ts ./
 
 # Install all dependencies (including devDependencies for building)
-# Use npm ci if lockfile exists, otherwise npm install
-# postinstall script will run prisma generate automatically
 RUN if [ -f package-lock.json ]; then npm ci; else npm install; fi
 
-# Force regenerate Prisma Client with binary engine type
-RUN npx prisma generate
+# Clean any cached Prisma client and force fresh generation with binary engine
+RUN rm -rf node_modules/.prisma node_modules/@prisma/client && \
+    npx prisma generate --schema=./prisma/schema.prisma
 
 # Copy source code and TypeScript config
 COPY src/ ./src/
@@ -41,18 +40,17 @@ RUN addgroup --system --gid 1001 nodejs && \
 COPY package.json ./
 COPY package-lock.json* ./
 
-# Copy Prisma files BEFORE npm install (needed for postinstall script)
+# Copy Prisma files BEFORE npm install
 COPY prisma/ ./prisma/
 COPY prisma.config.ts ./
 
 # Install only production dependencies
-# Use npm ci if lockfile exists, otherwise npm install
-# postinstall script will run prisma generate automatically
 RUN if [ -f package-lock.json ]; then npm ci --only=production; else npm install --only=production; fi && \
     npm cache clean --force
 
-# Force regenerate Prisma Client with updated schema (ensures binary engine is used)
-RUN npx prisma generate
+# Clean and force regenerate Prisma Client with binary engine (CRITICAL - cache bust: v2)
+RUN rm -rf node_modules/.prisma node_modules/@prisma/client && \
+    npx prisma generate --schema=./prisma/schema.prisma
 
 # Copy built application from builder stage
 COPY --from=builder /app/dist ./dist
