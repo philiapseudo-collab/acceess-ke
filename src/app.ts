@@ -16,6 +16,25 @@ app.use(express.urlencoded({ extended: true }));
 app.use('/webhooks', webhookRoutes);
 app.use('/', whatsappRoutes); // WhatsApp webhook at /webhook
 
+// Root endpoint
+app.get('/', (req, res) => {
+  res.json({
+    service: 'AccessKE Bot API',
+    status: 'running',
+    version: '1.0.0',
+    endpoints: {
+      health: '/health',
+      whatsapp: {
+        webhook: '/webhook (GET for verification, POST for messages)',
+      },
+      webhooks: {
+        intasend: '/webhooks/intasend (POST)',
+        pesapal: '/webhooks/pesapal (GET/POST)',
+      },
+    },
+  });
+});
+
 // Health check endpoint
 app.get('/health', (req, res) => {
   res.json({ status: 'ok' });
