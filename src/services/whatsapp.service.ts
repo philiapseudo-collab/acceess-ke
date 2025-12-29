@@ -27,13 +27,8 @@ class WhatsAppService {
     this.phoneNumberId = process.env.WA_PHONE_NUMBER_ID || '';
     this.accessToken = process.env.WA_ACCESS_TOKEN || '';
 
-    if (!this.phoneNumberId || !this.accessToken) {
-      throw new Error(
-        'WhatsApp credentials not configured. Set WA_PHONE_NUMBER_ID and WA_ACCESS_TOKEN'
-      );
-    }
-
-    this.baseUrl = `https://graph.facebook.com/${this.apiVersion}/${this.phoneNumberId}`;
+    // Build base URL (validation happens on first use)
+    this.baseUrl = `https://graph.facebook.com/${this.apiVersion}/${this.phoneNumberId || 'PLACEHOLDER'}`;
 
     // Initialize Axios instance
     this.axiosInstance = axios.create({
@@ -42,6 +37,25 @@ class WhatsAppService {
         'Content-Type': 'application/json',
       },
     });
+  }
+
+  /**
+   * Validates that required configuration is present
+   * Called before any API operation
+   * @throws AppError if configuration is missing
+   */
+  private validateConfig(): void {
+    if (!this.phoneNumberId || !this.accessToken) {
+      throw new AppError(
+        'WhatsApp credentials not configured. Set WA_PHONE_NUMBER_ID and WA_ACCESS_TOKEN',
+        500
+      );
+    }
+
+    // Update axios base URL if it was using placeholder
+    if (this.axiosInstance.defaults.baseURL?.includes('PLACEHOLDER')) {
+      this.axiosInstance.defaults.baseURL = `https://graph.facebook.com/${this.apiVersion}/${this.phoneNumberId}`;
+    }
   }
 
   /**
@@ -101,6 +115,9 @@ class WhatsAppService {
    */
   async sendText(to: string, body: string): Promise<WaServiceResponse> {
     try {
+      // Validate configuration
+      this.validateConfig();
+
       // Normalize phone number
       const normalizedTo = normalizePhoneNumber(to);
 
@@ -151,6 +168,9 @@ class WhatsAppService {
     buttons: WaButton[]
   ): Promise<WaServiceResponse> {
     try {
+      // Validate configuration
+      this.validateConfig();
+
       // Validate button limit
       if (buttons.length > 3) {
         throw new AppError('Maximum 3 buttons allowed', 500);
@@ -224,6 +244,9 @@ class WhatsAppService {
     sections: WaListSection[]
   ): Promise<WaServiceResponse> {
     try {
+      // Validate configuration
+      this.validateConfig();
+
       // Validate total rows limit (max 10 rows total)
       const totalRows = sections.reduce((sum, section) => sum + section.rows.length, 0);
 
@@ -301,6 +324,12 @@ class WhatsAppService {
    */
   async markAsRead(messageId: string): Promise<void> {
     try {
+      // Validate configuration (but don't throw - marking as read is non-critical)
+      if (!this.phoneNumberId || !this.accessToken) {
+        logger.warn('Cannot mark message as read: WhatsApp credentials not configured');
+        return;
+      }
+
       logger.debug(`Marking WhatsApp message as read: messageId=${messageId}`);
 
       const payload = {

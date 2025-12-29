@@ -3,11 +3,75 @@ import logger from '../config/logger';
 import { AppError } from '../utils/AppError';
 import ticketService from '../services/ticket.service';
 import { pesaPalService } from '../services/payment';
+import whatsappService from '../services/whatsapp.service';
+import prisma from '../config/prisma';
 
 /**
  * WebhookController handles payment provider webhooks
  */
 class WebhookController {
+  /**
+   * Sends WhatsApp confirmation message after successful payment
+   * @param bookingId - The booking ID
+   */
+  private async sendPaymentConfirmation(bookingId: string): Promise<void> {
+    try {
+      // Fetch booking with all related data
+      const booking = await prisma.booking.findUnique({
+        where: { id: bookingId },
+        include: {
+          user: true,
+          tickets: true,
+          ticketTier: {
+            include: {
+              event: true,
+            },
+          },
+        },
+      });
+
+      if (!booking) {
+        logger.warn(`Cannot send confirmation: Booking ${bookingId} not found`);
+        return;
+      }
+
+      // Format ticket codes
+      const ticketCodes = booking.tickets.map((t) => t.uniqueCode).join('\n');
+
+      // Format event date
+      const eventDate = new Date(booking.ticketTier.event.startTime).toLocaleDateString('en-KE', {
+        weekday: 'long',
+        year: 'numeric',
+        month: 'long',
+        day: 'numeric',
+        hour: '2-digit',
+        minute: '2-digit',
+      });
+
+      // Build confirmation message
+      const message =
+        `✅ *Payment Successful!*\n\n` +
+        `*Event:* ${booking.ticketTier.event.title}\n` +
+        `*Date:* ${eventDate}\n` +
+        `*Venue:* ${booking.ticketTier.event.venue}\n` +
+        `*Tier:* ${booking.ticketTier.name}\n` +
+        `*Quantity:* ${booking.quantity}\n` +
+        `*Total:* KES ${booking.totalAmount}\n\n` +
+        `*Your Ticket Codes:*\n${ticketCodes}\n\n` +
+        `Show these codes at the venue entrance. Keep them safe! 🎫`;
+
+      // Send WhatsApp message
+      await whatsappService.sendText(booking.user.phoneNumber, message);
+
+      logger.info(`Payment confirmation sent to ${booking.user.phoneNumber} for booking ${bookingId}`);
+    } catch (error) {
+      // Log error but don't throw - payment is already processed
+      logger.error(`Failed to send payment confirmation for booking ${bookingId}:`, {
+        error: error instanceof Error ? error.message : 'Unknown error',
+        stack: error instanceof Error ? error.stack : undefined,
+      });
+    }
+  }
   /**
    * Handles IntaSend webhook notifications
    * @param req - Express request
@@ -51,6 +115,11 @@ class WebhookController {
       );
 
       logger.info(`IntaSend booking completed: ${api_ref}`);
+
+      // Send WhatsApp confirmation (non-blocking)
+      this.sendPaymentConfirmation(api_ref).catch((err) => {
+        logger.error('Failed to send IntaSend payment confirmation:', err);
+      });
 
       // IntaSend expects simple "OK" response
       res.send('OK');
@@ -149,6 +218,11 @@ class WebhookController {
         );
 
         logger.info(`PesaPal booking completed: ${bookingId}`);
+
+        // Send WhatsApp confirmation (non-blocking)
+        this.sendPaymentConfirmation(bookingId).catch((err) => {
+          logger.error('Failed to send PesaPal payment confirmation:', err);
+        });
       } else {
         logger.info(`PesaPal payment not completed: status=${paymentStatus}`);
       }

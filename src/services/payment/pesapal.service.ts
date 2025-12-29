@@ -33,15 +33,7 @@ class PesaPalService {
     this.consumerSecret = process.env.PESAPAL_CONSUMER_SECRET || '';
     this.callbackUrl = process.env.PESAPAL_CALLBACK_URL || '';
 
-    if (!this.consumerKey || !this.consumerSecret) {
-      throw new Error('PesaPal credentials not configured. Set PESAPAL_CONSUMER_KEY and PESAPAL_CONSUMER_SECRET');
-    }
-
-    if (!this.callbackUrl) {
-      throw new Error('PesaPal callback URL not configured. Set PESAPAL_CALLBACK_URL');
-    }
-
-    // Initialize Axios instance
+    // Initialize Axios instance (validation happens on first use)
     this.axiosInstance = axios.create({
       baseURL: this.baseUrl,
       headers: {
@@ -49,6 +41,29 @@ class PesaPalService {
         'Accept': 'application/json',
       },
     });
+  }
+
+  /**
+   * Validates that required configuration is present
+   * Called before any API operation
+   * @throws PaymentError if configuration is missing
+   */
+  private validateConfig(): void {
+    if (!this.consumerKey || !this.consumerSecret) {
+      throw new PaymentError(
+        'PesaPal credentials not configured. Set PESAPAL_CONSUMER_KEY and PESAPAL_CONSUMER_SECRET',
+        'CONFIG_ERROR',
+        'PESAPAL'
+      );
+    }
+
+    if (!this.callbackUrl) {
+      throw new PaymentError(
+        'PesaPal callback URL not configured. Set PESAPAL_CALLBACK_URL',
+        'CONFIG_ERROR',
+        'PESAPAL'
+      );
+    }
   }
 
   /**
@@ -183,6 +198,9 @@ class PesaPalService {
    */
   async getPaymentLink(booking: BookingPaymentDTO): Promise<string> {
     try {
+      // Validate configuration
+      this.validateConfig();
+
       // Step 1: Get access token
       const token = await this.getAccessToken();
 
@@ -273,6 +291,9 @@ class PesaPalService {
    */
   async getTransactionStatus(orderTrackingId: string): Promise<any> {
     try {
+      // Validate configuration
+      this.validateConfig();
+
       // Get access token
       const token = await this.getAccessToken();
 
