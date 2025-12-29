@@ -15,7 +15,7 @@ class RedisService {
    * Gets the session for a phone number
    * @param phoneNumber - Phone number (will be normalized)
    * @returns Session object with state and data, defaults to IDLE if missing
-   * @throws Error if Redis operation fails
+   * Returns default IDLE session if Redis is unavailable (graceful degradation)
    */
   async getSession(phoneNumber: string): Promise<Session> {
     try {
@@ -34,8 +34,12 @@ class RedisService {
       const session: Session = JSON.parse(sessionJson);
       return session;
     } catch (error) {
-      logger.error(`Failed to get session for ${phoneNumber}:`, error);
-      throw new Error(`Redis session retrieval failed: ${error instanceof Error ? error.message : 'Unknown error'}`);
+      // Graceful degradation: return default session if Redis is unavailable
+      logger.warn(`Redis unavailable, returning default session for ${phoneNumber}:`, error instanceof Error ? error.message : 'Unknown error');
+      return {
+        state: BotState.IDLE,
+        data: {},
+      };
     }
   }
 
@@ -45,7 +49,7 @@ class RedisService {
    * @param phoneNumber - Phone number (will be normalized)
    * @param state - New bot state
    * @param data - Partial session data to merge
-   * @throws Error if Redis operation fails
+   * Silently fails if Redis is unavailable (graceful degradation)
    */
   async updateSession(
     phoneNumber: string,
@@ -76,15 +80,15 @@ class RedisService {
       
       logger.debug(`Session updated for ${normalized}: state=${state}`);
     } catch (error) {
-      logger.error(`Failed to update session for ${phoneNumber}:`, error);
-      throw new Error(`Redis session update failed: ${error instanceof Error ? error.message : 'Unknown error'}`);
+      // Graceful degradation: log warning but don't throw
+      logger.warn(`Redis unavailable, session update skipped for ${phoneNumber}:`, error instanceof Error ? error.message : 'Unknown error');
     }
   }
 
   /**
    * Clears the session, resetting to IDLE state
    * @param phoneNumber - Phone number (will be normalized)
-   * @throws Error if Redis operation fails
+   * Silently fails if Redis is unavailable (graceful degradation)
    */
   async clearSession(phoneNumber: string): Promise<void> {
     try {
@@ -101,8 +105,8 @@ class RedisService {
       
       logger.debug(`Session cleared for ${normalized}`);
     } catch (error) {
-      logger.error(`Failed to clear session for ${phoneNumber}:`, error);
-      throw new Error(`Redis session clear failed: ${error instanceof Error ? error.message : 'Unknown error'}`);
+      // Graceful degradation: log warning but don't throw
+      logger.warn(`Redis unavailable, session clear skipped for ${phoneNumber}:`, error instanceof Error ? error.message : 'Unknown error');
     }
   }
 
@@ -112,8 +116,8 @@ class RedisService {
    * @param resourceKey - The resource key (e.g., "event:123:tier:456")
    * @param ttlSeconds - Time to live in seconds
    * @param ownerPhoneNumber - Phone number of the lock owner (will be normalized)
-   * @returns true if lock was acquired, false if already locked
-   * @throws Error if Redis operation fails
+   * @returns true if lock was acquired, false if already locked or Redis unavailable
+   * Returns false if Redis is unavailable (graceful degradation - allows operation to proceed)
    */
   async acquireLock(
     resourceKey: string,
@@ -138,8 +142,10 @@ class RedisService {
         return false;
       }
     } catch (error) {
-      logger.error(`Failed to acquire lock for ${resourceKey}:`, error);
-      throw new Error(`Redis lock acquisition failed: ${error instanceof Error ? error.message : 'Unknown error'}`);
+      // Graceful degradation: allow operation to proceed if Redis is unavailable
+      // Database optimistic locking will still prevent double-processing
+      logger.warn(`Redis unavailable, lock acquisition skipped for ${resourceKey}:`, error instanceof Error ? error.message : 'Unknown error');
+      return true; // Allow operation to proceed
     }
   }
 
@@ -148,7 +154,7 @@ class RedisService {
    * @param resourceKey - The resource key
    * @param ownerPhoneNumber - Phone number of the expected lock owner (will be normalized)
    * @returns true if lock was released, false if lock doesn't exist or belongs to someone else
-   * @throws Error if Redis operation fails
+   * Silently fails if Redis is unavailable (graceful degradation)
    */
   async safeReleaseLock(
     resourceKey: string,
@@ -177,15 +183,16 @@ class RedisService {
       logger.debug(`Lock released: ${key} by ${normalized}`);
       return true;
     } catch (error) {
-      logger.error(`Failed to release lock for ${resourceKey}:`, error);
-      throw new Error(`Redis lock release failed: ${error instanceof Error ? error.message : 'Unknown error'}`);
+      // Graceful degradation: log warning but don't throw
+      logger.warn(`Redis unavailable, lock release skipped for ${resourceKey}:`, error instanceof Error ? error.message : 'Unknown error');
+      return false;
     }
   }
 
   /**
    * Releases a lock without ownership check (use with caution)
    * @param resourceKey - The resource key
-   * @throws Error if Redis operation fails
+   * Silently fails if Redis is unavailable (graceful degradation)
    */
   async releaseLock(resourceKey: string): Promise<void> {
     try {
@@ -193,8 +200,8 @@ class RedisService {
       await redisClient.del(key);
       logger.debug(`Lock force-released: ${key}`);
     } catch (error) {
-      logger.error(`Failed to force-release lock for ${resourceKey}:`, error);
-      throw new Error(`Redis lock force-release failed: ${error instanceof Error ? error.message : 'Unknown error'}`);
+      // Graceful degradation: log warning but don't throw
+      logger.warn(`Redis unavailable, lock force-release skipped for ${resourceKey}:`, error instanceof Error ? error.message : 'Unknown error');
     }
   }
 }
