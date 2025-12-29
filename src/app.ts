@@ -2,6 +2,8 @@ import express from 'express';
 import dotenv from 'dotenv';
 import webhookRoutes from './routes/webhook.routes';
 import whatsappRoutes from './routes/whatsapp.routes';
+import prisma from './config/prisma';
+import logger from './config/logger';
 
 // Load environment variables
 dotenv.config();
@@ -35,9 +37,30 @@ app.get('/', (req, res) => {
   });
 });
 
-// Health check endpoint
-app.get('/health', (req, res) => {
-  res.json({ status: 'ok' });
+// Health check endpoint with database check
+app.get('/health', async (req, res) => {
+  try {
+    // Test database connection
+    await prisma.$queryRaw`SELECT 1`;
+    
+    // Check if events table is accessible
+    const eventCount = await prisma.event.count();
+    
+    res.json({ 
+      status: 'ok',
+      database: 'connected',
+      events: eventCount,
+      timestamp: new Date().toISOString(),
+    });
+  } catch (error) {
+    logger.error('Health check failed:', error);
+    res.status(503).json({ 
+      status: 'error',
+      database: 'disconnected',
+      error: error instanceof Error ? error.message : 'Unknown error',
+      timestamp: new Date().toISOString(),
+    });
+  }
 });
 
 export default app;

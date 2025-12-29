@@ -73,9 +73,16 @@ class ConversationHandler {
 
   /**
    * Sends the welcome menu (list of active events)
+   * Includes retry logic for transient database connection errors
    */
-  private async sendWelcomeMenu(phone: string): Promise<void> {
+  private async sendWelcomeMenu(phone: string, retryCount = 0): Promise<void> {
+    const MAX_RETRIES = 2;
+    const RETRY_DELAY_MS = 1000;
+
     try {
+      // Ensure Prisma client is connected
+      await prisma.$connect();
+
       // Fetch top 10 active events
       const events = await prisma.event.findMany({
         where: {
@@ -117,7 +124,38 @@ class ConversationHandler {
         sections
       );
     } catch (error) {
-      logger.error('Failed to send welcome menu:', error);
+      // Enhanced error logging
+      const errorMessage = error instanceof Error ? error.message : 'Unknown error';
+      const errorStack = error instanceof Error ? error.stack : undefined;
+      const errorName = error instanceof Error ? error.name : 'Error';
+      
+      // Check if it's a connection error that might be retryable
+      const isConnectionError = 
+        errorMessage.includes('connection') ||
+        errorMessage.includes('timeout') ||
+        errorMessage.includes('ECONNREFUSED') ||
+        errorMessage.includes('P1001') || // Prisma connection error code
+        (error && typeof error === 'object' && 'code' in error && 
+         (error.code === 'P1001' || error.code === 'P1002' || error.code === 'P1008'));
+
+      logger.error('Failed to send welcome menu:', {
+        error: errorMessage,
+        name: errorName,
+        stack: errorStack,
+        phone,
+        retryCount,
+        isConnectionError,
+        // Log Prisma-specific errors
+        ...(error && typeof error === 'object' && 'code' in error ? { prismaCode: error.code } : {}),
+      });
+
+      // Retry on connection errors
+      if (isConnectionError && retryCount < MAX_RETRIES) {
+        logger.info(`Retrying welcome menu (attempt ${retryCount + 1}/${MAX_RETRIES})...`);
+        await new Promise(resolve => setTimeout(resolve, RETRY_DELAY_MS * (retryCount + 1)));
+        return this.sendWelcomeMenu(phone, retryCount + 1);
+      }
+      
       await whatsappService.sendText(
         phone,
         "Sorry, I'm having trouble loading events. Please try again later."
