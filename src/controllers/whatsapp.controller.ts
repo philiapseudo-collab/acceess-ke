@@ -29,20 +29,29 @@ class WhatsAppController {
         mode,
         verifyToken: verifyToken ? '***' : 'missing',
         challenge: challenge ? 'present' : 'missing',
+        expectedToken: process.env.WA_VERIFY_TOKEN ? 'set' : 'missing',
       });
 
       // Meta requires: mode === 'subscribe' AND verify_token matches
       if (mode === 'subscribe' && verifyToken === process.env.WA_VERIFY_TOKEN) {
         logger.info('Webhook verification: Success');
-        // Return challenge as plain text
-        res.status(200).send(challenge);
+        // Return challenge as plain text - CRITICAL: must be immediate
+        res.status(200).type('text/plain').send(challenge);
+        return;
       } else {
-        logger.warn('Webhook verification: Failed - Invalid token or mode');
+        logger.warn('Webhook verification: Failed', {
+          modeMatch: mode === 'subscribe',
+          tokenMatch: verifyToken === process.env.WA_VERIFY_TOKEN,
+          hasToken: !!process.env.WA_VERIFY_TOKEN,
+        });
         res.status(403).send('Forbidden');
+        return;
       }
     } catch (error) {
       logger.error('Webhook verification error:', error);
-      res.status(500).send('Internal error');
+      if (!res.headersSent) {
+        res.status(500).send('Internal error');
+      }
     }
   }
 

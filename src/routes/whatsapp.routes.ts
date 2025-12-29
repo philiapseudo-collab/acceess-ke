@@ -8,19 +8,28 @@ const router = Router();
  * GET /webhook - Webhook verification (Meta requirement)
  * POST /webhook - Incoming messages and events
  */
-router.get('/webhook', (req, res) => {
-  whatsappController.verifyWebhook(req, res).catch((error) => {
-    // Fallback error handler
-    console.error('Unhandled webhook verification error:', error);
-    res.status(500).send('Internal error');
-  });
+router.get('/webhook', async (req, res) => {
+  try {
+    await whatsappController.verifyWebhook(req, res);
+  } catch (error) {
+    // Fallback error handler - only send if response hasn't been sent
+    if (!res.headersSent) {
+      console.error('Unhandled webhook verification error:', error);
+      res.status(500).send('Internal error');
+    }
+  }
 });
 
-router.post('/webhook', (req, res) => {
-  whatsappController.receiveWebhook(req, res).catch((error) => {
-    // Fallback error handler (response already sent, just log)
-    console.error('Unhandled webhook receive error:', error);
-  });
+router.post('/webhook', async (req, res) => {
+  try {
+    await whatsappController.receiveWebhook(req, res);
+  } catch (error) {
+    // Fallback error handler - only send if response hasn't been sent
+    if (!res.headersSent) {
+      console.error('Unhandled webhook receive error:', error);
+      res.status(500).send('Internal error');
+    }
+  }
 });
 
 export default router;
