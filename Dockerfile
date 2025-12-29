@@ -17,6 +17,9 @@ COPY prisma.config.ts ./
 # postinstall script will run prisma generate automatically
 RUN if [ -f package-lock.json ]; then npm ci; else npm install; fi
 
+# Force regenerate Prisma Client with binary engine type
+RUN npx prisma generate
+
 # Copy source code and TypeScript config
 COPY src/ ./src/
 COPY tsconfig.json ./
@@ -47,6 +50,9 @@ COPY prisma.config.ts ./
 # postinstall script will run prisma generate automatically
 RUN if [ -f package-lock.json ]; then npm ci --only=production; else npm install --only=production; fi && \
     npm cache clean --force
+
+# Force regenerate Prisma Client with updated schema (ensures binary engine is used)
+RUN npx prisma generate
 
 # Copy built application from builder stage
 COPY --from=builder /app/dist ./dist
