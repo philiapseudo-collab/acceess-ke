@@ -17,6 +17,10 @@ class ConversationHandler {
   private readonly GLOBAL_COMMANDS = ['hi', 'menu', 'start', 'restart', 'cancel'];
   private readonly MAX_QUANTITY = 5;
   private readonly LOCK_TTL_SECONDS = 600; // 10 minutes
+  
+  // Track last welcome menu sent time per phone to prevent loops
+  private readonly lastWelcomeMenuSent = new Map<string, number>();
+  private readonly WELCOME_MENU_COOLDOWN_MS = 5000; // 5 seconds cooldown
 
   /**
    * Formats phone number for display (254712... -> 0712...)
@@ -74,10 +78,20 @@ class ConversationHandler {
   /**
    * Sends the welcome menu (list of active events)
    * Includes retry logic for transient database connection errors
+   * Prevents duplicate sends within cooldown period
    */
   private async sendWelcomeMenu(phone: string, retryCount = 0): Promise<void> {
     const MAX_RETRIES = 2;
     const RETRY_DELAY_MS = 1000;
+    const normalizedPhone = normalizePhoneNumber(phone);
+
+    // Prevent duplicate welcome menus within cooldown period
+    const lastSent = this.lastWelcomeMenuSent.get(normalizedPhone);
+    const now = Date.now();
+    if (lastSent && (now - lastSent) < this.WELCOME_MENU_COOLDOWN_MS && retryCount === 0) {
+      logger.debug(`Skipping duplicate welcome menu for ${normalizedPhone} (cooldown active)`);
+      return;
+    }
 
     try {
       // Ensure Prisma client is connected
@@ -141,6 +155,9 @@ class ConversationHandler {
         'View Events',
         sections
       );
+      
+      // Track that we sent the welcome menu
+      this.lastWelcomeMenuSent.set(normalizedPhone, Date.now());
     } catch (error) {
       // Enhanced error logging
       const errorMessage = error instanceof Error ? error.message : 'Unknown error';

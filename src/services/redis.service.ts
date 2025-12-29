@@ -8,34 +8,87 @@ const SESSION_KEY_PREFIX = 'session:';
 const LOCK_KEY_PREFIX = 'lock:';
 
 /**
+ * In-memory session fallback when Redis is unavailable
+ * Maps normalized phone number -> Session
+ */
+const inMemorySessions = new Map<string, { session: Session; expiresAt: number }>();
+
+/**
  * RedisService handles session management and distributed locking
+ * Falls back to in-memory storage when Redis is unavailable
  */
 class RedisService {
+  private isRedisAvailable: boolean = true;
+
+  /**
+   * Checks if Redis is available
+   */
+  private async checkRedisAvailability(): Promise<boolean> {
+    try {
+      await redisClient.ping();
+      this.isRedisAvailable = true;
+      return true;
+    } catch (error) {
+      this.isRedisAvailable = false;
+      return false;
+    }
+  }
+
+  /**
+   * Cleans up expired in-memory sessions
+   */
+  private cleanupInMemorySessions(): void {
+    const now = Date.now();
+    for (const [key, value] of inMemorySessions.entries()) {
+      if (value.expiresAt < now) {
+        inMemorySessions.delete(key);
+      }
+    }
+  }
   /**
    * Gets the session for a phone number
    * @param phoneNumber - Phone number (will be normalized)
    * @returns Session object with state and data, defaults to IDLE if missing
-   * Returns default IDLE session if Redis is unavailable (graceful degradation)
+   * Falls back to in-memory storage if Redis is unavailable
    */
   async getSession(phoneNumber: string): Promise<Session> {
+    const normalized = normalizePhoneNumber(phoneNumber);
+    const key = `${SESSION_KEY_PREFIX}${normalized}`;
+    
     try {
-      const normalized = normalizePhoneNumber(phoneNumber);
-      const key = `${SESSION_KEY_PREFIX}${normalized}`;
-      
+      // Try Redis first
       const sessionJson = await redisClient.get(key);
       
-      if (!sessionJson) {
-        return {
-          state: BotState.IDLE,
-          data: {},
-        };
+      if (sessionJson) {
+        const session: Session = JSON.parse(sessionJson);
+        return session;
       }
       
-      const session: Session = JSON.parse(sessionJson);
-      return session;
+      // Not in Redis, check in-memory fallback
+      this.cleanupInMemorySessions();
+      const inMemory = inMemorySessions.get(normalized);
+      if (inMemory && inMemory.expiresAt > Date.now()) {
+        return inMemory.session;
+      }
+      
+      // No session found, return default
+      return {
+        state: BotState.IDLE,
+        data: {},
+      };
     } catch (error) {
-      // Graceful degradation: return default session if Redis is unavailable
-      logger.warn(`Redis unavailable, returning default session for ${phoneNumber}:`, error instanceof Error ? error.message : 'Unknown error');
+      // Redis unavailable - use in-memory fallback
+      this.isRedisAvailable = false;
+      this.cleanupInMemorySessions();
+      
+      const inMemory = inMemorySessions.get(normalized);
+      if (inMemory && inMemory.expiresAt > Date.now()) {
+        logger.debug(`Using in-memory session for ${normalized} (Redis unavailable)`);
+        return inMemory.session;
+      }
+      
+      // No in-memory session, return default
+      logger.warn(`Redis unavailable, returning default session for ${normalized}:`, error instanceof Error ? error.message : 'Unknown error');
       return {
         state: BotState.IDLE,
         data: {},
@@ -49,65 +102,72 @@ class RedisService {
    * @param phoneNumber - Phone number (will be normalized)
    * @param state - New bot state
    * @param data - Partial session data to merge
-   * Silently fails if Redis is unavailable (graceful degradation)
+   * Falls back to in-memory storage if Redis is unavailable
    */
   async updateSession(
     phoneNumber: string,
     state: BotState,
     data?: Partial<SessionData>
   ): Promise<void> {
+    const normalized = normalizePhoneNumber(phoneNumber);
+    const key = `${SESSION_KEY_PREFIX}${normalized}`;
+    
+    // Get existing session (will use in-memory if Redis is down)
+    const existing = await this.getSession(phoneNumber);
+    
+    // Merge data
+    const updatedData: SessionData = {
+      ...existing.data,
+      ...data,
+    };
+    
+    // Create updated session
+    const updatedSession: Session = {
+      state,
+      data: updatedData,
+    };
+    
     try {
-      const normalized = normalizePhoneNumber(phoneNumber);
-      const key = `${SESSION_KEY_PREFIX}${normalized}`;
-      
-      // Get existing session
-      const existing = await this.getSession(phoneNumber);
-      
-      // Merge data
-      const updatedData: SessionData = {
-        ...existing.data,
-        ...data,
-      };
-      
-      // Create updated session
-      const updatedSession: Session = {
-        state,
-        data: updatedData,
-      };
-      
-      // Store with TTL
+      // Try Redis first
       await redisClient.setex(key, SESSION_TTL, JSON.stringify(updatedSession));
-      
-      logger.debug(`Session updated for ${normalized}: state=${state}`);
+      logger.debug(`Session updated in Redis for ${normalized}: state=${state}`);
     } catch (error) {
-      // Graceful degradation: log warning but don't throw
-      logger.warn(`Redis unavailable, session update skipped for ${phoneNumber}:`, error instanceof Error ? error.message : 'Unknown error');
+      // Redis unavailable - use in-memory fallback
+      this.isRedisAvailable = false;
+      const expiresAt = Date.now() + (SESSION_TTL * 1000);
+      inMemorySessions.set(normalized, { session: updatedSession, expiresAt });
+      logger.debug(`Session updated in-memory for ${normalized}: state=${state} (Redis unavailable)`);
     }
   }
 
   /**
    * Clears the session, resetting to IDLE state
    * @param phoneNumber - Phone number (will be normalized)
-   * Silently fails if Redis is unavailable (graceful degradation)
+   * Falls back to in-memory storage if Redis is unavailable
    */
   async clearSession(phoneNumber: string): Promise<void> {
+    const normalized = normalizePhoneNumber(phoneNumber);
+    const key = `${SESSION_KEY_PREFIX}${normalized}`;
+    
+    const clearedSession: Session = {
+      state: BotState.IDLE,
+      data: {},
+    };
+    
     try {
-      const normalized = normalizePhoneNumber(phoneNumber);
-      const key = `${SESSION_KEY_PREFIX}${normalized}`;
-      
-      const clearedSession: Session = {
-        state: BotState.IDLE,
-        data: {},
-      };
-      
-      // Set to IDLE state (or delete - setting is safer for consistency)
+      // Try Redis first
       await redisClient.setex(key, SESSION_TTL, JSON.stringify(clearedSession));
-      
-      logger.debug(`Session cleared for ${normalized}`);
+      logger.debug(`Session cleared in Redis for ${normalized}`);
     } catch (error) {
-      // Graceful degradation: log warning but don't throw
-      logger.warn(`Redis unavailable, session clear skipped for ${phoneNumber}:`, error instanceof Error ? error.message : 'Unknown error');
+      // Redis unavailable - use in-memory fallback
+      this.isRedisAvailable = false;
+      const expiresAt = Date.now() + (SESSION_TTL * 1000);
+      inMemorySessions.set(normalized, { session: clearedSession, expiresAt });
+      logger.debug(`Session cleared in-memory for ${normalized} (Redis unavailable)`);
     }
+    
+    // Also clear from in-memory (in case it exists there)
+    inMemorySessions.delete(normalized);
   }
 
   /**
