@@ -106,14 +106,32 @@ class ConversationHandler {
       }
 
       // Format events as list sections
+      // WhatsApp limits: title max 24 chars, description max 72 chars
       const sections = [
         {
           title: 'Upcoming Events',
-          rows: events.map((event) => ({
-            id: event.id,
-            title: event.title,
-            description: `${new Date(event.startTime).toLocaleDateString()} • ${event.venue}`,
-          })),
+          rows: events.map((event) => {
+            // Truncate title to 24 chars (WhatsApp limit)
+            const truncatedTitle = event.title.length > 24 
+              ? event.title.substring(0, 21) + '...' 
+              : event.title;
+            
+            // Format description: date and venue (max 72 chars)
+            const dateStr = new Date(event.startTime).toLocaleDateString('en-US', { 
+              month: 'short', 
+              day: 'numeric' 
+            });
+            const description = `${dateStr} • ${event.venue}`;
+            const truncatedDescription = description.length > 72 
+              ? description.substring(0, 69) + '...' 
+              : description;
+
+            return {
+              id: event.id,
+              title: truncatedTitle,
+              description: truncatedDescription,
+            };
+          }),
         },
       ];
 
@@ -294,20 +312,44 @@ class ConversationHandler {
       }
 
       // Format ticket tiers as list
+      // WhatsApp limits: body max 1024 chars, title max 24 chars, description max 72 chars
+      const eventTitle = event.title.length > 50 ? event.title.substring(0, 47) + '...' : event.title;
+      const eventDescription = event.description 
+        ? (event.description.length > 200 ? event.description.substring(0, 197) + '...' : event.description)
+        : '';
+      
+      // Build body text (max 1024 chars total)
+      let bodyText = `🎫 ${eventTitle}`;
+      if (eventDescription) {
+        bodyText += `\n\n${eventDescription}`;
+      }
+      bodyText += '\n\nSelect a ticket type:';
+      
+      // Truncate body if needed (leave some margin)
+      if (bodyText.length > 1000) {
+        bodyText = bodyText.substring(0, 997) + '...';
+      }
+
       const sections = [
         {
           title: 'Ticket Types',
-          rows: event.ticketTiers.map((tier) => ({
-            id: tier.id,
-            title: tier.name,
-            description: `KES ${tier.price.toString()} • ${tier.quantity} available`,
-          })),
+          rows: event.ticketTiers.map((tier) => {
+            // Format price (remove decimals if .00)
+            const priceStr = tier.price.toNumber().toFixed(0);
+            const description = `KES ${priceStr} • ${tier.quantity} available`;
+            
+            return {
+              id: tier.id,
+              title: tier.name, // Will be truncated by WhatsApp service if needed
+              description: description, // Will be truncated by WhatsApp service if needed
+            };
+          }),
         },
       ];
 
       await whatsappService.sendList(
         phone,
-        `🎫 ${event.title}\n\n${event.description || ''}\n\nSelect a ticket type:`,
+        bodyText,
         'View Tickets',
         sections
       );

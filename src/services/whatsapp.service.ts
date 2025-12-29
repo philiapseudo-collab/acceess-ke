@@ -94,6 +94,16 @@ class WhatsAppService {
           const errorCode = metaError.code || 'UNKNOWN';
           const errorType = metaError.type || 'UNKNOWN';
 
+          // Log full error details for debugging
+          logger.error('WhatsApp API error details:', {
+            code: errorCode,
+            type: errorType,
+            message: errorMessage,
+            subcode: metaError.error_subcode,
+            fbtrace_id: metaError.fbtrace_id,
+            responseData: axiosError.response?.data,
+          });
+
           throw new AppError(
             `WhatsApp API error (${errorType}): ${errorMessage}`,
             500
@@ -264,9 +274,25 @@ class WhatsAppService {
       // Normalize phone number
       const normalizedTo = normalizePhoneNumber(to);
 
+      // Validate and truncate button text (max 20 chars)
+      const truncatedButtonText = buttonText.length > 20 ? buttonText.substring(0, 17) + '...' : buttonText;
+
       logger.info(
         `Sending WhatsApp list to ${normalizedTo}, sections=${sections.length}, totalRows=${totalRows}`
       );
+
+      // Format sections with proper length limits
+      // WhatsApp limits: title max 24 chars, description max 72 chars, button max 20 chars
+      const formattedSections = sections.map((section) => ({
+        title: section.title.length > 24 ? section.title.substring(0, 21) + '...' : section.title,
+        rows: section.rows.map((row) => ({
+          id: row.id.length > 200 ? row.id.substring(0, 197) + '...' : row.id, // ID max 200 chars
+          title: row.title.length > 24 ? row.title.substring(0, 21) + '...' : row.title, // Title max 24 chars
+          description: row.description && row.description.length > 72 
+            ? row.description.substring(0, 69) + '...' 
+            : row.description || '', // Description max 72 chars, required field
+        })),
+      }));
 
       const payload = {
         messaging_product: 'whatsapp',
@@ -277,19 +303,11 @@ class WhatsAppService {
           body: {
             text: body,
           },
-          footer: {
-            text: buttonText,
-          },
+          // Footer is optional - only include if buttonText is different from footer text
+          // Remove footer to avoid potential issues
           action: {
-            button: buttonText,
-            sections: sections.map((section) => ({
-              title: section.title,
-              rows: section.rows.map((row) => ({
-                id: row.id,
-                title: row.title,
-                description: row.description,
-              })),
-            })),
+            button: truncatedButtonText,
+            sections: formattedSections,
           },
         },
       };
