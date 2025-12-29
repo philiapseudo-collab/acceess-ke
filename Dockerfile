@@ -15,9 +15,8 @@ COPY prisma.config.ts ./
 # Install all dependencies (including devDependencies for building)
 RUN if [ -f package-lock.json ]; then npm ci; else npm install; fi
 
-# Clean any cached Prisma client and force fresh generation with binary engine
-RUN rm -rf node_modules/.prisma node_modules/@prisma/client && \
-    npx prisma generate --schema=./prisma/schema.prisma
+# Force fresh generation with binary engine (overwrites any cached client)
+RUN npx prisma generate --schema=./prisma/schema.prisma
 
 # Copy source code and TypeScript config
 COPY src/ ./src/
@@ -48,9 +47,8 @@ COPY prisma.config.ts ./
 RUN if [ -f package-lock.json ]; then npm ci --only=production; else npm install --only=production; fi && \
     npm cache clean --force
 
-# Clean and force regenerate Prisma Client with binary engine (CRITICAL - cache bust: v2)
-RUN rm -rf node_modules/.prisma node_modules/@prisma/client && \
-    npx prisma generate --schema=./prisma/schema.prisma
+# Force regenerate Prisma Client with binary engine (overwrites cached client - v3)
+RUN npx prisma generate --schema=./prisma/schema.prisma
 
 # Copy built application from builder stage
 COPY --from=builder /app/dist ./dist
