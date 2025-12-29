@@ -10,15 +10,28 @@ dotenv.config();
  * IntaSendService handles M-Pesa STK Push payments via IntaSend
  */
 class IntaSendService {
-  private client: IntaSend;
+  private client: IntaSend | null = null;
 
-  constructor() {
+  /**
+   * Validates that required configuration is present and initializes client
+   * Called before any API operation
+   * @throws PaymentError if configuration is missing
+   */
+  private ensureClient(): void {
+    if (this.client) {
+      return; // Already initialized
+    }
+
     const publishableKey = process.env.INTASEND_PUBLISHABLE_KEY;
     const secretKey = process.env.INTASEND_SECRET_KEY;
     const isTest = process.env.INTASEND_IS_TEST === 'true';
 
     if (!publishableKey || !secretKey) {
-      throw new Error('IntaSend credentials not configured. Set INTASEND_PUBLISHABLE_KEY and INTASEND_SECRET_KEY');
+      throw new PaymentError(
+        'IntaSend credentials not configured. Set INTASEND_PUBLISHABLE_KEY and INTASEND_SECRET_KEY',
+        'CONFIG_ERROR',
+        'INTASEND'
+      );
     }
 
     // Initialize IntaSend client
@@ -40,6 +53,9 @@ class IntaSendService {
     apiRef: string
   ): Promise<IntaSendSTKResponse> {
     try {
+      // Ensure client is initialized (lazy validation)
+      this.ensureClient();
+
       // Validate phone number format
       if (!validatePhoneNumber(phone)) {
         throw new PaymentError(
@@ -55,7 +71,7 @@ class IntaSendService {
       logger.info(`Initiating STK Push: phone=${normalizedPhone}, amount=${amount}, apiRef=${apiRef}`);
 
       // Trigger STK Push using IntaSend SDK
-      const response = await this.client.collection().mpesaStkPush({
+      const response = await this.client!.collection().mpesaStkPush({
         phone: normalizedPhone,
         amount: amount,
         api_ref: apiRef,
