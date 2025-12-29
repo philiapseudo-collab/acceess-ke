@@ -5,10 +5,12 @@ FROM node:20-alpine AS builder
 WORKDIR /app
 
 # Copy package files for dependency installation
-COPY package.json package-lock.json ./
+COPY package.json ./
+COPY package-lock.json* ./
 
 # Install all dependencies (including devDependencies for building)
-RUN npm ci
+# Use npm ci if lockfile exists, otherwise npm install
+RUN if [ -f package-lock.json ]; then npm ci; else npm install; fi
 
 # Copy Prisma schema and config
 COPY prisma/ ./prisma/
@@ -35,10 +37,13 @@ RUN addgroup --system --gid 1001 nodejs && \
     adduser --system --uid 1001 nodejs
 
 # Copy package files
-COPY package.json package-lock.json ./
+COPY package.json ./
+COPY package-lock.json* ./
 
 # Install only production dependencies
-RUN npm ci --only=production && npm cache clean --force
+# Use npm ci if lockfile exists, otherwise npm install
+RUN if [ -f package-lock.json ]; then npm ci --only=production; else npm install --only=production; fi && \
+    npm cache clean --force
 
 # Copy Prisma files (schema needed for client initialization)
 COPY prisma/ ./prisma/
