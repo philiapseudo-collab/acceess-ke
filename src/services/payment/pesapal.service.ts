@@ -121,7 +121,7 @@ class PesaPalService {
       if (response.status < 200 || response.status >= 300) {
         const errorData = response.data as any;
         let errorMessage = errorData?.error?.message || errorData?.message || `HTTP ${response.status}`;
-        const errorCode = errorData?.error?.code || 'AUTH_FAILED';
+        const errorCode: string = errorData?.error?.code || 'AUTH_FAILED';
         
         // Provide specific message for invalid credentials
         if (errorCode === 'invalid_consumer_key_or_secret_provided') {
@@ -140,7 +140,7 @@ class PesaPalService {
       const responseData = response.data as any;
       if (responseData.error) {
         let errorMessage = responseData.error.message || responseData.error.code || 'Authentication failed';
-        const errorCode = responseData.error.code || 'AUTH_FAILED';
+        const errorCode: string = responseData.error.code || 'AUTH_FAILED';
         
         // Provide specific message for invalid credentials
         if (errorCode === 'invalid_consumer_key_or_secret_provided') {
@@ -165,13 +165,14 @@ class PesaPalService {
       }
 
       // Cache token and calculate expiry
-      this.token = responseData.token;
+      const token = responseData.token;
+      this.token = token;
       const expiresIn = responseData.expires_in || 3600; // Default to 1 hour if not provided
       this.tokenExpiry = now + expiresIn * 1000;
 
       logger.info(`PesaPal token refreshed. Expires in ${expiresIn} seconds`);
 
-      return this.token;
+      return token;
     } catch (error) {
       logger.error('PesaPal token refresh failed:', error);
 
@@ -186,7 +187,7 @@ class PesaPalService {
         
         // Extract error message from response
         let errorMessage = 'Authentication failed';
-        let errorCode = 'AUTH_FAILED';
+        let errorCode: string = 'AUTH_FAILED';
         
         if (data?.error) {
           errorMessage = data.error.message || data.error.code || errorMessage;
