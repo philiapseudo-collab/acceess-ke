@@ -23,6 +23,7 @@ export interface SessionData {
   totalAmount?: number;
   paymentMethod?: 'MPESA' | 'CARD';
   tempBookingId?: string;
+  selectedCategory?: string; // Store the selected category to allow going back to events
 }
 
 /**

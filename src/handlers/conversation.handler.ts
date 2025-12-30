@@ -539,9 +539,11 @@ class ConversationHandler {
       // Send events for this category
       await this.sendEventsForCategory(phone, category);
       
-      // Update state to BROWSING_EVENTS (so next click handles event selection)
-      // Clear any stale session data to prevent state corruption
-      await redisService.updateSession(phone, BotState.BROWSING_EVENTS, {});
+      // Update state to BROWSING_EVENTS and store the selected category
+      // This allows users to go back to events from ticket tiers
+      await redisService.updateSession(phone, BotState.BROWSING_EVENTS, {
+        selectedCategory: category,
+      });
     } catch (error) {
       logger.error('Error handling SELECTING_CATEGORY:', error);
       throw error;
@@ -656,22 +658,31 @@ class ConversationHandler {
         bodyText = bodyText.substring(0, 997) + '...';
       }
 
+      const rows = availableTiers.map((tier) => {
+        // Format price (remove decimals if .00)
+        const priceStr = tier.price.toNumber().toFixed(0);
+        // Calculate available tickets: quantity - quantitySold
+        const available = tier.quantity - tier.quantitySold;
+        const description = `KES ${priceStr} • ${available} available`;
+        
+        return {
+          id: tier.id,
+          title: tier.name, // Will be truncated by WhatsApp service if needed
+          description: description, // Will be truncated by WhatsApp service if needed
+        };
+      });
+
+      // Add BACK button to return to events list (same category)
+      rows.push({
+        id: 'BACK_TO_EVENTS',
+        title: '🔙 Back to Events',
+        description: 'Return to event list',
+      });
+
       const sections = [
         {
           title: 'Ticket Types',
-          rows: availableTiers.map((tier) => {
-            // Format price (remove decimals if .00)
-            const priceStr = tier.price.toNumber().toFixed(0);
-            // Calculate available tickets: quantity - quantitySold
-            const available = tier.quantity - tier.quantitySold;
-            const description = `KES ${priceStr} • ${available} available`;
-            
-            return {
-              id: tier.id,
-              title: tier.name, // Will be truncated by WhatsApp service if needed
-              description: description, // Will be truncated by WhatsApp service if needed
-            };
-          }),
+          rows,
         },
       ];
 
@@ -682,8 +693,11 @@ class ConversationHandler {
         sections
       );
 
+      // Get current session to preserve selectedCategory
+      const { data: currentData } = await redisService.getSession(phone);
       await redisService.updateSession(phone, BotState.SELECTING_TIER, {
         eventId: event.id,
+        selectedCategory: currentData?.selectedCategory, // Preserve category for back navigation
       });
     } catch (error) {
       logger.error('Error handling BROWSING_EVENTS:', error);
@@ -700,14 +714,47 @@ class ConversationHandler {
     data: SessionData
   ): Promise<void> {
     try {
-      logger.info(`handleSelectingTier: phone=${phone}, tierId=${tierId}, eventId=${data.eventId}`);
+      logger.info(`handleSelectingTier: phone=${phone}, tierId=${tierId}, eventId=${data.eventId}, category=${data.selectedCategory}`);
       
-      // Safety check: if tierId looks like an event ID (UUID format), user might be in wrong state
-      // This can happen if state got corrupted or user clicked event while in wrong state
-      if (!tierId || tierId === 'BACK_TO_CATEGORIES') {
-        logger.warn(`Invalid tierId or BACK button in SELECTING_TIER: tierId=${tierId}`);
+      // Handle BACK button - return to events list for the same category
+      if (tierId === 'BACK_TO_EVENTS') {
+        if (data.selectedCategory && Object.values(EventCategory).includes(data.selectedCategory as EventCategory)) {
+          logger.info(`User clicked BACK_TO_EVENTS, returning to ${data.selectedCategory} events`);
+          await this.sendEventsForCategory(phone, data.selectedCategory as EventCategory);
+          await redisService.updateSession(phone, BotState.BROWSING_EVENTS, {
+            selectedCategory: data.selectedCategory,
+          });
+          return;
+        } else {
+          // No category stored, go back to categories
+          logger.warn(`BACK_TO_EVENTS clicked but no category in session, going to categories`);
+          await this.sendCategoryMenu(phone);
+          await redisService.updateSession(phone, BotState.SELECTING_CATEGORY, {});
+          return;
+        }
+      }
+      
+      // Handle BACK_TO_CATEGORIES (shouldn't happen here, but handle it)
+      if (tierId === 'BACK_TO_CATEGORIES') {
+        logger.warn(`BACK_TO_CATEGORIES clicked in SELECTING_TIER, going to categories`);
         await this.sendCategoryMenu(phone);
-        await redisService.updateSession(phone, BotState.SELECTING_CATEGORY);
+        await redisService.updateSession(phone, BotState.SELECTING_CATEGORY, {});
+        return;
+      }
+      
+      // Safety check: if tierId is empty or invalid
+      if (!tierId) {
+        logger.warn(`Invalid tierId in SELECTING_TIER: tierId=${tierId}`);
+        // Try to go back to events if we have a category
+        if (data.selectedCategory && Object.values(EventCategory).includes(data.selectedCategory as EventCategory)) {
+          await this.sendEventsForCategory(phone, data.selectedCategory as EventCategory);
+          await redisService.updateSession(phone, BotState.BROWSING_EVENTS, {
+            selectedCategory: data.selectedCategory,
+          });
+          return;
+        }
+        await this.sendCategoryMenu(phone);
+        await redisService.updateSession(phone, BotState.SELECTING_CATEGORY, {});
         return;
       }
       
