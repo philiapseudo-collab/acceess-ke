@@ -15,7 +15,7 @@ import { Prisma, EventCategory } from '@prisma/client';
  * This is the core brain that orchestrates all services
  */
 class ConversationHandler {
-  private readonly GLOBAL_COMMANDS = ['hi', 'menu', 'start', 'restart', 'cancel'];
+  private readonly GLOBAL_COMMANDS = ['hi', 'menu', 'start', 'restart', 'reset', 'cancel'];
   private readonly MAX_QUANTITY = 5;
   private readonly LOCK_TTL_SECONDS = 600; // 10 minutes
   
@@ -429,8 +429,9 @@ class ConversationHandler {
       // Ensure user exists
       const userId = await this.ensureUser(user.phone, user.name);
 
-      // Handle global commands
+      // Handle global commands (reset/restart commands clear session and start fresh)
       if (this.GLOBAL_COMMANDS.includes(normalizedBody)) {
+        logger.info(`Global command received: ${normalizedBody} from ${normalizedPhone} - clearing session and starting fresh`);
         await redisService.clearSession(normalizedPhone);
         await this.sendCategoryMenu(normalizedPhone);
         await redisService.updateSession(normalizedPhone, BotState.SELECTING_CATEGORY);
