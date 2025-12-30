@@ -115,7 +115,6 @@ class ConversationHandler {
           rows: categories.map((category) => ({
             id: category,
             title: categoryDisplayMap[category] || category,
-            description: 'Browse events in this category',
           })),
         },
       ];
