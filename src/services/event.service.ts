@@ -36,11 +36,12 @@ class EventService {
    * Filters by isActive, future startTime, and category
    */
   async getEventsByCategory(category: EventCategory) {
-    return await prisma.event.findMany({
+    const now = new Date();
+    const events = await prisma.event.findMany({
       where: {
         isActive: true,
         startTime: {
-          gt: new Date(),
+          gt: now,
         },
         category,
       },
@@ -55,6 +56,14 @@ class EventService {
         startTime: 'asc',
       },
     });
+    
+    // Log for debugging
+    console.log(`getEventsByCategory(${category}): Found ${events.length} events`);
+    if (events.length > 0) {
+      console.log(`Sample event IDs: ${events.slice(0, 3).map(e => e.id).join(', ')}`);
+    }
+    
+    return events;
   }
 
   /**

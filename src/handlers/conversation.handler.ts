@@ -439,6 +439,8 @@ class ConversationHandler {
 
       // Fetch current session state
       const { state, data } = await redisService.getSession(normalizedPhone);
+      
+      logger.info(`Message routing: phone=${normalizedPhone}, state=${state}, messageType=${message.type}, body=${message.body}, id=${message.id}`);
 
       // Route based on state
       switch (state) {
@@ -448,11 +450,17 @@ class ConversationHandler {
           break;
 
         case BotState.SELECTING_CATEGORY:
-          await this.handleSelectingCategory(normalizedPhone, message.id || message.body);
+          // For interactive messages, use the ID from the list/button reply
+          const categoryId = message.id || message.body;
+          logger.info(`SELECTING_CATEGORY: phone=${normalizedPhone}, categoryId=${categoryId}`);
+          await this.handleSelectingCategory(normalizedPhone, categoryId);
           break;
 
         case BotState.BROWSING_EVENTS:
-          await this.handleBrowsingEvents(normalizedPhone, message.id || message.body, userId);
+          // For interactive messages, use the ID from the list/button reply
+          const eventId = message.id || message.body;
+          logger.info(`BROWSING_EVENTS: phone=${normalizedPhone}, eventId=${eventId}, state=${state}`);
+          await this.handleBrowsingEvents(normalizedPhone, eventId, userId);
           break;
 
         case BotState.SELECTING_TIER:
@@ -539,8 +547,22 @@ class ConversationHandler {
     userId: string
   ): Promise<void> {
     try {
+      logger.info(`handleBrowsingEvents: phone=${phone}, eventId=${eventId}`);
+      
       // Check if user clicked BACK button
       if (eventId === 'BACK_TO_CATEGORIES') {
+        await this.sendCategoryMenu(phone);
+        await redisService.updateSession(phone, BotState.SELECTING_CATEGORY);
+        return;
+      }
+
+      // Validate eventId format (should be a UUID)
+      if (!eventId || eventId.length < 10) {
+        logger.warn(`Invalid eventId format: ${eventId}`);
+        await whatsappService.sendText(
+          phone,
+          "Invalid selection. Let's go back to categories:"
+        );
         await this.sendCategoryMenu(phone);
         await redisService.updateSession(phone, BotState.SELECTING_CATEGORY);
         return;
@@ -558,7 +580,21 @@ class ConversationHandler {
         },
       });
 
-      if (!event || !event.isActive) {
+      logger.info(`Event lookup result: found=${!!event}, isActive=${event?.isActive}, tiers=${event?.ticketTiers?.length || 0}`);
+
+      if (!event) {
+        logger.warn(`Event not found: eventId=${eventId}`);
+        await whatsappService.sendText(
+          phone,
+          "That event is no longer available. Let's go back to categories:"
+        );
+        await this.sendCategoryMenu(phone);
+        await redisService.updateSession(phone, BotState.SELECTING_CATEGORY);
+        return;
+      }
+
+      if (!event.isActive) {
+        logger.warn(`Event is inactive: eventId=${eventId}, title=${event.title}`);
         await whatsappService.sendText(
           phone,
           "That event is no longer available. Let's go back to categories:"
@@ -646,8 +682,22 @@ class ConversationHandler {
     data: SessionData
   ): Promise<void> {
     try {
+      logger.info(`handleSelectingTier: phone=${phone}, tierId=${tierId}, eventId=${data.eventId}`);
+      
+      // Safety check: if tierId looks like an event ID (UUID format), user might be in wrong state
+      // This can happen if state got corrupted or user clicked event while in wrong state
+      if (!tierId || tierId === 'BACK_TO_CATEGORIES') {
+        logger.warn(`Invalid tierId or BACK button in SELECTING_TIER: tierId=${tierId}`);
+        await this.sendCategoryMenu(phone);
+        await redisService.updateSession(phone, BotState.SELECTING_CATEGORY);
+        return;
+      }
+      
       if (!data.eventId) {
-        throw new AppError('Event ID missing from session', 500);
+        logger.error(`Event ID missing from session in SELECTING_TIER: phone=${phone}`);
+        await this.sendCategoryMenu(phone);
+        await redisService.updateSession(phone, BotState.SELECTING_CATEGORY);
+        return;
       }
 
       // Fetch tier
@@ -659,18 +709,20 @@ class ConversationHandler {
       });
 
       if (!tier || tier.eventId !== data.eventId || !tier.event.isActive) {
+        logger.warn(`Tier validation failed: tier=${!!tier}, eventIdMatch=${tier?.eventId === data.eventId}, eventActive=${tier?.event?.isActive}`);
         await whatsappService.sendText(
           phone,
-          "That ticket type is no longer available. Here are the current events:"
+          "That ticket type is no longer available. Let's go back to categories:"
         );
-        await this.sendWelcomeMenu(phone);
-        await redisService.updateSession(phone, BotState.BROWSING_EVENTS);
+        await this.sendCategoryMenu(phone);
+        await redisService.updateSession(phone, BotState.SELECTING_CATEGORY);
         return;
       }
 
       // Check availability using calculated field: quantity - quantitySold
       const available = tier.quantity - tier.quantitySold;
       if (available <= 0) {
+        logger.warn(`Tier sold out: tierId=${tierId}, available=${available}`);
         await whatsappService.sendText(
           phone,
           "Sorry, this ticket type is sold out. Let's go back to categories:"
