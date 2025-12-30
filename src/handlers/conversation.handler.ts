@@ -464,7 +464,16 @@ class ConversationHandler {
           break;
 
         case BotState.SELECTING_TIER:
-          await this.handleSelectingTier(normalizedPhone, message.id || message.body, data);
+          // Safety check: if user clicks BACK or if ID looks like an event ID, reset to categories
+          const tierId = message.id || message.body;
+          if (tierId === 'BACK_TO_CATEGORIES') {
+            await this.sendCategoryMenu(normalizedPhone);
+            await redisService.updateSession(normalizedPhone, BotState.SELECTING_CATEGORY);
+            break;
+          }
+          // If tier lookup fails and it might be an event ID, reset state
+          // This handles cases where state is stale from previous interaction
+          await this.handleSelectingTier(normalizedPhone, tierId, data);
           break;
 
         case BotState.SELECTING_QUANTITY:
@@ -530,7 +539,8 @@ class ConversationHandler {
       await this.sendEventsForCategory(phone, category);
       
       // Update state to BROWSING_EVENTS (so next click handles event selection)
-      await redisService.updateSession(phone, BotState.BROWSING_EVENTS);
+      // Clear any stale session data to prevent state corruption
+      await redisService.updateSession(phone, BotState.BROWSING_EVENTS, {});
     } catch (error) {
       logger.error('Error handling SELECTING_CATEGORY:', error);
       throw error;
@@ -552,7 +562,14 @@ class ConversationHandler {
       // Check if user clicked BACK button
       if (eventId === 'BACK_TO_CATEGORIES') {
         await this.sendCategoryMenu(phone);
-        await redisService.updateSession(phone, BotState.SELECTING_CATEGORY);
+        await redisService.updateSession(phone, BotState.SELECTING_CATEGORY, {});
+        return;
+      }
+      
+      // Safety check: If the ID looks like a category, handle it as category selection
+      if (Object.values(EventCategory).includes(eventId as EventCategory)) {
+        logger.warn(`User clicked category ${eventId} while in BROWSING_EVENTS state. Handling as category selection.`);
+        await this.handleSelectingCategory(phone, eventId);
         return;
       }
 
@@ -564,7 +581,7 @@ class ConversationHandler {
           "Invalid selection. Let's go back to categories:"
         );
         await this.sendCategoryMenu(phone);
-        await redisService.updateSession(phone, BotState.SELECTING_CATEGORY);
+        await redisService.updateSession(phone, BotState.SELECTING_CATEGORY, {});
         return;
       }
 
@@ -708,7 +725,39 @@ class ConversationHandler {
         },
       });
 
-      if (!tier || tier.eventId !== data.eventId || !tier.event.isActive) {
+      // If tier not found, check if this might be an event ID (user clicked event while in wrong state)
+      if (!tier) {
+        logger.warn(`Tier not found: tierId=${tierId}. Checking if it's an event ID...`);
+        // Check if this ID is actually an event ID
+        const eventCheck = await prisma.event.findUnique({
+          where: { id: tierId },
+        });
+        
+        if (eventCheck) {
+          // User clicked an event while in SELECTING_TIER state - reset to categories
+          logger.warn(`User clicked event ${tierId} while in SELECTING_TIER state. Resetting to categories.`);
+          await whatsappService.sendText(
+            phone,
+            "Let's start fresh. Choose a category:"
+          );
+          await this.sendCategoryMenu(phone);
+          await redisService.updateSession(phone, BotState.SELECTING_CATEGORY);
+          return;
+        }
+        
+        // Not an event ID either - invalid selection
+        logger.warn(`Invalid tier ID: tierId=${tierId}`);
+        await whatsappService.sendText(
+          phone,
+          "That selection is no longer available. Let's go back to categories:"
+        );
+        await this.sendCategoryMenu(phone);
+        await redisService.updateSession(phone, BotState.SELECTING_CATEGORY);
+        return;
+      }
+
+      // Validate tier belongs to the event in session
+      if (tier.eventId !== data.eventId || !tier.event.isActive) {
         logger.warn(`Tier validation failed: tier=${!!tier}, eventIdMatch=${tier?.eventId === data.eventId}, eventActive=${tier?.event?.isActive}`);
         await whatsappService.sendText(
           phone,
