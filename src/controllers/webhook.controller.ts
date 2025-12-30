@@ -50,7 +50,7 @@ class WebhookController {
 
       // Build confirmation message
       const message =
-        `✅ *Payment Successful!*\n\n` +
+        `✅ *Booking Confirmed!*\n\n` +
         `*Event:* ${booking.ticketTier.event.title}\n` +
         `*Date:* ${eventDate}\n` +
         `*Venue:* ${booking.ticketTier.event.venue}\n` +
@@ -58,7 +58,8 @@ class WebhookController {
         `*Quantity:* ${booking.quantity}\n` +
         `*Total:* KES ${booking.totalAmount}\n\n` +
         `*Your Ticket Codes:*\n${ticketCodes}\n\n` +
-        `Show these codes at the venue entrance. Keep them safe! 🎫`;
+        `Show these codes at the venue entrance. Keep them safe! 🎫\n\n` +
+        `Powered by Dumu Technologies 🚀 https://dumu-website.vercel.app/`;
 
       // Send WhatsApp message
       await whatsappService.sendText(booking.user.phoneNumber, message);
