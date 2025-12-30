@@ -2,6 +2,7 @@ import express from 'express';
 import dotenv from 'dotenv';
 import webhookRoutes from './routes/webhook.routes';
 import whatsappRoutes from './routes/whatsapp.routes';
+import paymentRoutes from './routes/payment.routes';
 import prisma from './config/prisma';
 import logger from './config/logger';
 
@@ -16,6 +17,7 @@ app.use(express.urlencoded({ extended: true }));
 
 // Routes
 app.use('/webhooks', webhookRoutes);
+app.use('/payment', paymentRoutes); // Payment success redirect
 app.use('/', whatsappRoutes); // WhatsApp webhook at /webhook
 
 // Root endpoint
@@ -32,6 +34,9 @@ app.get('/', (req, res) => {
       webhooks: {
         intasend: '/webhooks/intasend (POST)',
         pesapal: '/webhooks/pesapal (GET/POST)',
+      },
+      payment: {
+        success: '/payment/success (GET - redirects to WhatsApp)',
       },
     },
   });

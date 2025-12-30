@@ -25,29 +25,40 @@ class PesaPalService {
   private readonly baseUrl: string;
   private readonly consumerKey: string;
   private readonly consumerSecret: string;
-  private readonly callbackUrl: string;
+  private readonly webhookUrl: string; // For IPN notifications (webhook)
+  private readonly successRedirectUrl: string; // For user redirect after payment
 
   constructor() {
     this.baseUrl = process.env.PESAPAL_BASE_URL || 'https://pay.pesapal.com/v3/api';
     this.consumerKey = process.env.PESAPAL_CONSUMER_KEY || '';
     this.consumerSecret = process.env.PESAPAL_CONSUMER_SECRET || '';
     
-    // Try to auto-detect callback URL from environment, fallback to explicit config
-    const explicitCallbackUrl = process.env.PESAPAL_CALLBACK_URL;
+    // Webhook URL for IPN notifications (POST to /webhooks/pesapal)
+    const explicitWebhookUrl = process.env.PESAPAL_WEBHOOK_URL;
     const railwayPublicDomain = process.env.RAILWAY_PUBLIC_DOMAIN;
     const railwayServiceUrl = process.env.RAILWAY_SERVICE_URL;
     
-    if (explicitCallbackUrl) {
-      this.callbackUrl = explicitCallbackUrl;
+    if (explicitWebhookUrl) {
+      this.webhookUrl = explicitWebhookUrl;
     } else if (railwayPublicDomain) {
-      // Railway provides public domain - construct callback URL
-      this.callbackUrl = `https://${railwayPublicDomain}/webhooks/pesapal`;
+      this.webhookUrl = `https://${railwayPublicDomain}/webhooks/pesapal`;
     } else if (railwayServiceUrl) {
-      // Railway service URL (might be internal, but try it)
-      this.callbackUrl = `${railwayServiceUrl}/webhooks/pesapal`;
+      this.webhookUrl = `${railwayServiceUrl}/webhooks/pesapal`;
     } else {
-      // No callback URL available
-      this.callbackUrl = '';
+      this.webhookUrl = '';
+    }
+
+    // Success redirect URL for user redirect after payment (GET /payment/success)
+    const explicitSuccessUrl = process.env.PESAPAL_SUCCESS_URL;
+    
+    if (explicitSuccessUrl) {
+      this.successRedirectUrl = explicitSuccessUrl;
+    } else if (railwayPublicDomain) {
+      this.successRedirectUrl = `https://${railwayPublicDomain}/payment/success`;
+    } else if (railwayServiceUrl) {
+      this.successRedirectUrl = `${railwayServiceUrl}/payment/success`;
+    } else {
+      this.successRedirectUrl = '';
     }
 
     // Initialize Axios instance (validation happens on first use)
@@ -81,12 +92,26 @@ class PesaPalService {
       );
     }
 
-    if (!this.callbackUrl) {
+    if (!this.webhookUrl) {
       const errorMessage = 
-        'PesaPal callback URL not configured. ' +
-        'Set PESAPAL_CALLBACK_URL environment variable to your webhook endpoint. ' +
+        'PesaPal webhook URL not configured. ' +
+        'Set PESAPAL_WEBHOOK_URL environment variable to your webhook endpoint. ' +
         'Example: https://your-domain.com/webhooks/pesapal ' +
-        '(Railway users: Set PESAPAL_CALLBACK_URL=https://your-app.railway.app/webhooks/pesapal)';
+        '(Railway users: Set PESAPAL_WEBHOOK_URL=https://your-app.railway.app/webhooks/pesapal)';
+      
+      throw new PaymentError(
+        errorMessage,
+        'CONFIG_ERROR',
+        'PESAPAL'
+      );
+    }
+
+    if (!this.successRedirectUrl) {
+      const errorMessage = 
+        'PesaPal success redirect URL not configured. ' +
+        'Set PESAPAL_SUCCESS_URL environment variable to your success redirect endpoint. ' +
+        'Example: https://your-domain.com/payment/success ' +
+        '(Railway users: Set PESAPAL_SUCCESS_URL=https://your-app.railway.app/payment/success)';
       
       throw new PaymentError(
         errorMessage,
@@ -98,7 +123,8 @@ class PesaPalService {
     // Log configuration status (without exposing secrets)
     logger.debug('PesaPal configuration validated', {
       baseUrl: this.baseUrl,
-      callbackUrl: this.callbackUrl,
+      webhookUrl: this.webhookUrl,
+      successRedirectUrl: this.successRedirectUrl,
       consumerKeyLength: this.consumerKey.length,
       consumerSecretLength: this.consumerSecret.length,
     });
@@ -308,7 +334,7 @@ class PesaPalService {
       const response = await this.axiosInstance.post<PesaPalIPNResponse>(
         '/URLSetup/RegisterIPN',
         {
-          url: this.callbackUrl,
+          url: this.webhookUrl,
           ipn_notification_type: 'POST',
         },
         {
@@ -373,8 +399,8 @@ class PesaPalService {
         currency: 'KES',
         amount: booking.amount,
         description: `Event ticket booking - ${booking.id}`,
-        notification_id: ipnId,
-        callback_url: this.callbackUrl,
+        notification_id: ipnId, // IPN webhook URL (for server-to-server notifications)
+        callback_url: this.successRedirectUrl, // User redirect URL (where user goes after payment)
         billing_address: {
           email_address: booking.email,
           phone_number: booking.phone,
