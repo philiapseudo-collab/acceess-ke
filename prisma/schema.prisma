@@ -25,6 +25,14 @@ enum PaymentMethod {
   CARD
 }
 
+enum EventCategory {
+  UNIVERSITY
+  CONCERT
+  CLUB
+  SOCIAL
+  HOLIDAY
+}
+
 // Models
 model User {
   id          String    @id @default(uuid())
@@ -38,16 +46,17 @@ model User {
 }
 
 model Event {
-  id          String       @id @default(uuid())
+  id          String         @id @default(uuid())
   title       String
   description String?
   startTime   DateTime
   endTime     DateTime
   venue       String
   bannerUrl   String?
-  isActive    Boolean      @default(true)
-  createdAt   DateTime     @default(now())
-  updatedAt   DateTime     @updatedAt
+  isActive    Boolean        @default(true)
+  category    EventCategory  @default(SOCIAL)
+  createdAt   DateTime       @default(now())
+  updatedAt   DateTime       @updatedAt
   ticketTiers TicketTier[]
 
   @@map("events")

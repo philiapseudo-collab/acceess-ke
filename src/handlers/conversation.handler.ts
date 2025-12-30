@@ -2,12 +2,13 @@ import redisService from '../services/redis.service';
 import whatsappService from '../services/whatsapp.service';
 import { intaSendService } from '../services/payment';
 import { pesaPalService } from '../services/payment';
+import eventService from '../services/event.service';
 import prisma from '../config/prisma';
 import logger from '../config/logger';
 import { BotState, SessionData } from '../types/session';
 import { AppError } from '../utils/AppError';
 import { normalizePhoneNumber } from '../utils/phoneNormalizer';
-import { Prisma } from '@prisma/client';
+import { Prisma, EventCategory } from '@prisma/client';
 
 /**
  * ConversationHandler manages the WhatsApp conversation flow
@@ -76,9 +77,219 @@ class ConversationHandler {
   }
 
   /**
+   * Sends the category selection menu
+   * Shows all available event categories as a List Message
+   */
+  private async sendCategoryMenu(phone: string, retryCount = 0): Promise<void> {
+    const MAX_RETRIES = 2;
+    const RETRY_DELAY_MS = 1000;
+    const normalizedPhone = normalizePhoneNumber(phone);
+
+    // Prevent duplicate category menus within cooldown period
+    const lastSent = this.lastWelcomeMenuSent.get(normalizedPhone);
+    const now = Date.now();
+    if (lastSent && (now - lastSent) < this.WELCOME_MENU_COOLDOWN_MS && retryCount === 0) {
+      logger.debug(`Skipping duplicate category menu for ${normalizedPhone} (cooldown active)`);
+      return;
+    }
+
+    try {
+      // Ensure Prisma client is connected
+      await prisma.$connect();
+
+      // Get all categories
+      const categories = await eventService.getCategories();
+
+      // Map categories to display names with emojis
+      const categoryDisplayMap: Record<EventCategory, string> = {
+        [EventCategory.UNIVERSITY]: '🎓 University Events',
+        [EventCategory.CONCERT]: '🎵 Concerts',
+        [EventCategory.CLUB]: '🎉 Club Nights',
+        [EventCategory.SOCIAL]: '🤝 Social Events',
+        [EventCategory.HOLIDAY]: '🎆 Holiday Celebrations',
+      };
+
+      const sections = [
+        {
+          title: 'Event Categories',
+          rows: categories.map((category) => ({
+            id: category,
+            title: categoryDisplayMap[category] || category,
+            description: 'Browse events in this category',
+          })),
+        },
+      ];
+
+      await whatsappService.sendList(
+        phone,
+        '🎫 Welcome to AccessKE! Choose a category to explore events:',
+        'Browse Categories',
+        sections
+      );
+      
+      // Track that we sent the category menu
+      this.lastWelcomeMenuSent.set(normalizedPhone, Date.now());
+    } catch (error) {
+      // Enhanced error logging
+      const errorMessage = error instanceof Error ? error.message : 'Unknown error';
+      const errorStack = error instanceof Error ? error.stack : undefined;
+      const errorName = error instanceof Error ? error.name : 'Error';
+      
+      // Check if it's a connection error that might be retryable
+      const isConnectionError = 
+        errorMessage.includes('connection') ||
+        errorMessage.includes('timeout') ||
+        errorMessage.includes('ECONNREFUSED') ||
+        errorMessage.includes('P1001') || // Prisma connection error code
+        (error && typeof error === 'object' && 'code' in error && 
+         (error.code === 'P1001' || error.code === 'P1002' || error.code === 'P1008'));
+
+      logger.error('Failed to send category menu:', {
+        error: errorMessage,
+        name: errorName,
+        stack: errorStack,
+        phone,
+        retryCount,
+        isConnectionError,
+        ...(error && typeof error === 'object' && 'code' in error ? { prismaCode: error.code } : {}),
+      });
+
+      // Retry on connection errors
+      if (isConnectionError && retryCount < MAX_RETRIES) {
+        logger.info(`Retrying category menu (attempt ${retryCount + 1}/${MAX_RETRIES})...`);
+        await new Promise(resolve => setTimeout(resolve, RETRY_DELAY_MS * (retryCount + 1)));
+        return this.sendCategoryMenu(phone, retryCount + 1);
+      }
+      
+      await whatsappService.sendText(
+        phone,
+        "Sorry, I'm having trouble loading categories. Please try again later."
+      );
+    }
+  }
+
+  /**
+   * Sends events for a specific category
+   * Includes a BACK button to return to categories
+   */
+  private async sendEventsForCategory(phone: string, category: EventCategory, retryCount = 0): Promise<void> {
+    const MAX_RETRIES = 2;
+    const RETRY_DELAY_MS = 1000;
+    const normalizedPhone = normalizePhoneNumber(phone);
+
+    try {
+      // Ensure Prisma client is connected
+      await prisma.$connect();
+
+      // Fetch events for this category
+      const events = await eventService.getEventsByCategory(category);
+
+      if (events.length === 0) {
+        await whatsappService.sendText(
+          phone,
+          `Sorry, there are no upcoming ${category.toLowerCase()} events at the moment. Check back later! 🎉`
+        );
+        return;
+      }
+
+      // Format events as list sections
+      // WhatsApp limits: title max 24 chars, description max 72 chars
+      const categoryDisplayMap: Record<EventCategory, string> = {
+        [EventCategory.UNIVERSITY]: '🎓 University',
+        [EventCategory.CONCERT]: '🎵 Concert',
+        [EventCategory.CLUB]: '🎉 Club',
+        [EventCategory.SOCIAL]: '🤝 Social',
+        [EventCategory.HOLIDAY]: '🎆 Holiday',
+      };
+
+      const rows = events.map((event) => {
+        // Truncate title to 24 chars (WhatsApp limit)
+        const truncatedTitle = event.title.length > 24 
+          ? event.title.substring(0, 21) + '...' 
+          : event.title;
+        
+        // Format description: date and venue (max 72 chars)
+        const dateStr = new Date(event.startTime).toLocaleDateString('en-US', { 
+          month: 'short', 
+          day: 'numeric' 
+        });
+        const description = `${dateStr} • ${event.venue}`;
+        const truncatedDescription = description.length > 72 
+          ? description.substring(0, 69) + '...' 
+          : description;
+
+        return {
+          id: event.id,
+          title: truncatedTitle,
+          description: truncatedDescription,
+        };
+      });
+
+      // Add BACK button as the last row
+      rows.push({
+        id: 'BACK_TO_CATEGORIES',
+        title: '🔙 Back to Categories',
+        description: 'Return to category selection',
+      });
+
+      const sections = [
+        {
+          title: `${categoryDisplayMap[category]} Events`,
+          rows,
+        },
+      ];
+
+      await whatsappService.sendList(
+        phone,
+        `🎫 ${categoryDisplayMap[category]} Events. Select an event to view tickets:`,
+        'View Events',
+        sections
+      );
+    } catch (error) {
+      // Enhanced error logging
+      const errorMessage = error instanceof Error ? error.message : 'Unknown error';
+      const errorStack = error instanceof Error ? error.stack : undefined;
+      const errorName = error instanceof Error ? error.name : 'Error';
+      
+      // Check if it's a connection error that might be retryable
+      const isConnectionError = 
+        errorMessage.includes('connection') ||
+        errorMessage.includes('timeout') ||
+        errorMessage.includes('ECONNREFUSED') ||
+        errorMessage.includes('P1001') ||
+        (error && typeof error === 'object' && 'code' in error && 
+         (error.code === 'P1001' || error.code === 'P1002' || error.code === 'P1008'));
+
+      logger.error('Failed to send events for category:', {
+        error: errorMessage,
+        name: errorName,
+        stack: errorStack,
+        phone,
+        category,
+        retryCount,
+        isConnectionError,
+        ...(error && typeof error === 'object' && 'code' in error ? { prismaCode: error.code } : {}),
+      });
+
+      // Retry on connection errors
+      if (isConnectionError && retryCount < MAX_RETRIES) {
+        logger.info(`Retrying events for category (attempt ${retryCount + 1}/${MAX_RETRIES})...`);
+        await new Promise(resolve => setTimeout(resolve, RETRY_DELAY_MS * (retryCount + 1)));
+        return this.sendEventsForCategory(phone, category, retryCount + 1);
+      }
+      
+      await whatsappService.sendText(
+        phone,
+        "Sorry, I'm having trouble loading events. Please try again later."
+      );
+    }
+  }
+
+  /**
    * Sends the welcome menu (list of active events)
    * Includes retry logic for transient database connection errors
    * Prevents duplicate sends within cooldown period
+   * NOTE: This is kept for legacy/admin use, but the main flow now uses categories
    */
   private async sendWelcomeMenu(phone: string, retryCount = 0): Promise<void> {
     const MAX_RETRIES = 2;
@@ -221,8 +432,8 @@ class ConversationHandler {
       // Handle global commands
       if (this.GLOBAL_COMMANDS.includes(normalizedBody)) {
         await redisService.clearSession(normalizedPhone);
-        await this.sendWelcomeMenu(normalizedPhone);
-        await redisService.updateSession(normalizedPhone, BotState.BROWSING_EVENTS);
+        await this.sendCategoryMenu(normalizedPhone);
+        await redisService.updateSession(normalizedPhone, BotState.SELECTING_CATEGORY);
         return;
       }
 
@@ -232,8 +443,12 @@ class ConversationHandler {
       // Route based on state
       switch (state) {
         case BotState.IDLE:
-          await this.sendWelcomeMenu(normalizedPhone);
-          await redisService.updateSession(normalizedPhone, BotState.BROWSING_EVENTS);
+          await this.sendCategoryMenu(normalizedPhone);
+          await redisService.updateSession(normalizedPhone, BotState.SELECTING_CATEGORY);
+          break;
+
+        case BotState.SELECTING_CATEGORY:
+          await this.handleSelectingCategory(normalizedPhone, message.id || message.body);
           break;
 
         case BotState.BROWSING_EVENTS:
@@ -283,7 +498,40 @@ class ConversationHandler {
   }
 
   /**
+   * Handles SELECTING_CATEGORY state
+   * User has selected a category, show events for that category
+   */
+  private async handleSelectingCategory(
+    phone: string,
+    categoryId: string
+  ): Promise<void> {
+    try {
+      // Validate category
+      if (!Object.values(EventCategory).includes(categoryId as EventCategory)) {
+        await whatsappService.sendText(
+          phone,
+          "Invalid category selection. Please choose from the menu."
+        );
+        await this.sendCategoryMenu(phone);
+        return;
+      }
+
+      const category = categoryId as EventCategory;
+      
+      // Send events for this category
+      await this.sendEventsForCategory(phone, category);
+      
+      // Update state to BROWSING_EVENTS (so next click handles event selection)
+      await redisService.updateSession(phone, BotState.BROWSING_EVENTS);
+    } catch (error) {
+      logger.error('Error handling SELECTING_CATEGORY:', error);
+      throw error;
+    }
+  }
+
+  /**
    * Handles BROWSING_EVENTS state
+   * Handles both event selection and BACK button
    */
   private async handleBrowsingEvents(
     phone: string,
@@ -291,6 +539,13 @@ class ConversationHandler {
     userId: string
   ): Promise<void> {
     try {
+      // Check if user clicked BACK button
+      if (eventId === 'BACK_TO_CATEGORIES') {
+        await this.sendCategoryMenu(phone);
+        await redisService.updateSession(phone, BotState.SELECTING_CATEGORY);
+        return;
+      }
+
       // Fetch event with all ticket tiers
       const event = await prisma.event.findUnique({
         where: { id: eventId },
@@ -306,10 +561,10 @@ class ConversationHandler {
       if (!event || !event.isActive) {
         await whatsappService.sendText(
           phone,
-          "That event is no longer available. Here are the current events:"
+          "That event is no longer available. Let's go back to categories:"
         );
-        await this.sendWelcomeMenu(phone);
-        await redisService.updateSession(phone, BotState.BROWSING_EVENTS);
+        await this.sendCategoryMenu(phone);
+        await redisService.updateSession(phone, BotState.SELECTING_CATEGORY);
         return;
       }
 
@@ -321,10 +576,10 @@ class ConversationHandler {
       if (availableTiers.length === 0) {
         await whatsappService.sendText(
           phone,
-          "Sorry, this event has no available tickets. Here are other events:"
+          "Sorry, this event has no available tickets. Let's go back to categories:"
         );
-        await this.sendWelcomeMenu(phone);
-        await redisService.updateSession(phone, BotState.BROWSING_EVENTS);
+        await this.sendCategoryMenu(phone);
+        await redisService.updateSession(phone, BotState.SELECTING_CATEGORY);
         return;
       }
 
@@ -418,10 +673,10 @@ class ConversationHandler {
       if (available <= 0) {
         await whatsappService.sendText(
           phone,
-          "Sorry, this ticket type is sold out. Here are other events:"
+          "Sorry, this ticket type is sold out. Let's go back to categories:"
         );
-        await this.sendWelcomeMenu(phone);
-        await redisService.updateSession(phone, BotState.BROWSING_EVENTS);
+        await this.sendCategoryMenu(phone);
+        await redisService.updateSession(phone, BotState.SELECTING_CATEGORY);
         return;
       }
 
