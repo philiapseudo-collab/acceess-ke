@@ -117,18 +117,56 @@ class PesaPalService {
         }
       );
 
-      if (!response.data.token) {
+      // Check for HTTP error status codes
+      if (response.status < 200 || response.status >= 300) {
+        const errorData = response.data as any;
+        let errorMessage = errorData?.error?.message || errorData?.message || `HTTP ${response.status}`;
+        const errorCode = errorData?.error?.code || 'AUTH_FAILED';
+        
+        // Provide specific message for invalid credentials
+        if (errorCode === 'invalid_consumer_key_or_secret_provided') {
+          errorMessage = 'Invalid PesaPal credentials. Please check PESAPAL_CONSUMER_KEY and PESAPAL_CONSUMER_SECRET environment variables.';
+        }
+        
+        throw new PaymentError(
+          `PesaPal authentication failed: ${errorMessage}`,
+          errorCode,
+          'PESAPAL',
+          { status: response.status, data: errorData }
+        );
+      }
+
+      // Check for error object in response (even with 200 status)
+      const responseData = response.data as any;
+      if (responseData.error) {
+        let errorMessage = responseData.error.message || responseData.error.code || 'Authentication failed';
+        const errorCode = responseData.error.code || 'AUTH_FAILED';
+        
+        // Provide specific message for invalid credentials
+        if (errorCode === 'invalid_consumer_key_or_secret_provided') {
+          errorMessage = 'Invalid PesaPal credentials. Please check PESAPAL_CONSUMER_KEY and PESAPAL_CONSUMER_SECRET environment variables.';
+        }
+        
+        throw new PaymentError(
+          `PesaPal authentication failed: ${errorMessage}`,
+          errorCode,
+          'PESAPAL',
+          responseData
+        );
+      }
+
+      if (!responseData.token) {
         throw new PaymentError(
           'PesaPal authentication failed: No token in response',
           'AUTH_FAILED',
           'PESAPAL',
-          response.data
+          responseData
         );
       }
 
       // Cache token and calculate expiry
-      this.token = response.data.token;
-      const expiresIn = response.data.expires_in || 3600; // Default to 1 hour if not provided
+      this.token = responseData.token;
+      const expiresIn = responseData.expires_in || 3600; // Default to 1 hour if not provided
       this.tokenExpiry = now + expiresIn * 1000;
 
       logger.info(`PesaPal token refreshed. Expires in ${expiresIn} seconds`);
@@ -139,6 +177,37 @@ class PesaPalService {
 
       if (error instanceof PaymentError) {
         throw error;
+      }
+
+      // Handle Axios errors
+      if (axios.isAxiosError(error)) {
+        const status = error.response?.status;
+        const data = error.response?.data as any;
+        
+        // Extract error message from response
+        let errorMessage = 'Authentication failed';
+        let errorCode = 'AUTH_FAILED';
+        
+        if (data?.error) {
+          errorMessage = data.error.message || data.error.code || errorMessage;
+          errorCode = data.error.code || errorCode;
+          
+          // Provide specific message for invalid credentials
+          if (errorCode === 'invalid_consumer_key_or_secret_provided') {
+            errorMessage = 'Invalid PesaPal credentials. Please check PESAPAL_CONSUMER_KEY and PESAPAL_CONSUMER_SECRET environment variables.';
+          }
+        } else if (data?.message) {
+          errorMessage = data.message;
+        } else if (error.message) {
+          errorMessage = error.message;
+        }
+
+        throw new PaymentError(
+          `PesaPal authentication failed: ${errorMessage}`,
+          errorCode,
+          'PESAPAL',
+          { status, data, originalError: error }
+        );
       }
 
       const errorMessage = error instanceof Error ? error.message : 'Unknown error';
