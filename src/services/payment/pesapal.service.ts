@@ -67,6 +67,13 @@ class PesaPalService {
    */
   private validateConfig(): void {
     if (!this.consumerKey || !this.consumerSecret) {
+      logger.error('PesaPal configuration missing', {
+        hasConsumerKey: !!this.consumerKey,
+        hasConsumerSecret: !!this.consumerSecret,
+        consumerKeyLength: this.consumerKey?.length || 0,
+        consumerSecretLength: this.consumerSecret?.length || 0,
+      });
+      
       throw new PaymentError(
         'PesaPal credentials not configured. Set PESAPAL_CONSUMER_KEY and PESAPAL_CONSUMER_SECRET',
         'CONFIG_ERROR',
@@ -87,6 +94,14 @@ class PesaPalService {
         'PESAPAL'
       );
     }
+    
+    // Log configuration status (without exposing secrets)
+    logger.debug('PesaPal configuration validated', {
+      baseUrl: this.baseUrl,
+      callbackUrl: this.callbackUrl,
+      consumerKeyLength: this.consumerKey.length,
+      consumerSecretLength: this.consumerSecret.length,
+    });
   }
 
   /**
@@ -106,7 +121,10 @@ class PesaPalService {
     }
 
     try {
-      logger.info('Refreshing PesaPal access token');
+      logger.info('Refreshing PesaPal access token', {
+        baseUrl: this.baseUrl,
+        consumerKeyPrefix: this.consumerKey ? `${this.consumerKey.substring(0, 5)}...` : 'NOT SET',
+      });
 
       // Request new token
       const response = await this.axiosInstance.post<PesaPalAuthResponse>(
@@ -174,7 +192,30 @@ class PesaPalService {
 
       return token;
     } catch (error) {
-      logger.error('PesaPal token refresh failed:', error);
+      // Log detailed error information
+      if (axios.isAxiosError(error)) {
+        const status = error.response?.status;
+        const data = error.response?.data as any;
+        const requestUrl = error.config?.url;
+        const requestMethod = error.config?.method;
+        
+        logger.error('PesaPal token refresh failed - Axios error', {
+          status,
+          statusText: error.response?.statusText,
+          url: requestUrl,
+          method: requestMethod,
+          responseData: data,
+          errorMessage: error.message,
+        });
+      } else {
+        logger.error('PesaPal token refresh failed - Unknown error', {
+          error: error instanceof Error ? {
+            message: error.message,
+            stack: error.stack,
+            name: error.name,
+          } : error,
+        });
+      }
 
       if (error instanceof PaymentError) {
         throw error;
@@ -189,25 +230,51 @@ class PesaPalService {
         let errorMessage = 'Authentication failed';
         let errorCode: string = 'AUTH_FAILED';
         
+        // Check multiple possible error response formats
         if (data?.error) {
+          // Format: { error: { code: "...", message: "..." } }
           errorMessage = data.error.message || data.error.code || errorMessage;
           errorCode = data.error.code || errorCode;
-          
-          // Provide specific message for invalid credentials
-          if (errorCode === 'invalid_consumer_key_or_secret_provided') {
-            errorMessage = 'Invalid PesaPal credentials. Please check PESAPAL_CONSUMER_KEY and PESAPAL_CONSUMER_SECRET environment variables.';
+        } else if (typeof data === 'object' && data !== null) {
+          // Check for error code/message at root level
+          if (data.code) {
+            errorCode = data.code;
+            errorMessage = data.message || data.code;
+          } else if (data.message) {
+            errorMessage = data.message;
           }
-        } else if (data?.message) {
-          errorMessage = data.message;
+        } else if (typeof data === 'string') {
+          errorMessage = data;
         } else if (error.message) {
           errorMessage = error.message;
+        }
+        
+        // Provide specific message for invalid credentials
+        if (errorCode === 'invalid_consumer_key_or_secret_provided' || 
+            errorMessage.includes('invalid_consumer_key_or_secret_provided') ||
+            errorMessage.includes('consumer_key') ||
+            errorMessage.includes('consumer_secret')) {
+          errorMessage = 'Invalid PesaPal credentials. Please verify PESAPAL_CONSUMER_KEY and PESAPAL_CONSUMER_SECRET environment variables are correct.';
+          errorCode = 'invalid_consumer_key_or_secret_provided';
         }
 
         throw new PaymentError(
           `PesaPal authentication failed: ${errorMessage}`,
           errorCode,
           'PESAPAL',
-          { status, data, originalError: error }
+          { 
+            status, 
+            data, 
+            originalError: {
+              message: error.message,
+              code: error.code,
+              response: error.response ? {
+                status: error.response.status,
+                statusText: error.response.statusText,
+                data: error.response.data,
+              } : undefined,
+            }
+          }
         );
       }
 
