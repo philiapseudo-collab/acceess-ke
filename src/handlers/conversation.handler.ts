@@ -291,16 +291,11 @@ class ConversationHandler {
     userId: string
   ): Promise<void> {
     try {
-      // Fetch event
+      // Fetch event with all ticket tiers
       const event = await prisma.event.findUnique({
         where: { id: eventId },
         include: {
           ticketTiers: {
-            where: {
-              quantity: {
-                gt: 0, // Only show tiers with available tickets
-              },
-            },
             orderBy: {
               price: 'asc',
             },
@@ -318,7 +313,12 @@ class ConversationHandler {
         return;
       }
 
-      if (event.ticketTiers.length === 0) {
+      // Filter tiers with available tickets (calculated: quantity - quantitySold > 0)
+      const availableTiers = event.ticketTiers.filter(
+        (tier) => tier.quantity - tier.quantitySold > 0
+      );
+
+      if (availableTiers.length === 0) {
         await whatsappService.sendText(
           phone,
           "Sorry, this event has no available tickets. Here are other events:"
@@ -350,10 +350,12 @@ class ConversationHandler {
       const sections = [
         {
           title: 'Ticket Types',
-          rows: event.ticketTiers.map((tier) => {
+          rows: availableTiers.map((tier) => {
             // Format price (remove decimals if .00)
             const priceStr = tier.price.toNumber().toFixed(0);
-            const description = `KES ${priceStr} • ${tier.quantity} available`;
+            // Calculate available tickets: quantity - quantitySold
+            const available = tier.quantity - tier.quantitySold;
+            const description = `KES ${priceStr} • ${available} available`;
             
             return {
               id: tier.id,
@@ -411,7 +413,9 @@ class ConversationHandler {
         return;
       }
 
-      if (tier.quantity <= 0) {
+      // Check availability using calculated field: quantity - quantitySold
+      const available = tier.quantity - tier.quantitySold;
+      if (available <= 0) {
         await whatsappService.sendText(
           phone,
           "Sorry, this ticket type is sold out. Here are other events:"

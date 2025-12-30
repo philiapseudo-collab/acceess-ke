@@ -113,65 +113,44 @@ class TicketService {
     try {
       logger.info(`Completing booking: bookingId=${bookingId}, paymentRef=${paymentRef}`);
 
-      // Step 1: Optimistic locking - Update booking only if still PENDING or AWAITING_PAYMENT
-      const updateResult = await prisma.booking.updateMany({
-        where: {
-          id: bookingId,
-          status: {
-            in: ['PENDING', 'AWAITING_PAYMENT'],
-          },
-        },
-        data: {
-          status: 'PAID',
-          paymentReference: paymentRef,
-          ...(paymentPhone && { paymentPhoneNumber: paymentPhone }),
-        },
-      });
-
-      // Check if update was successful (idempotency check)
-      if (updateResult.count === 0) {
-        // Booking was already processed or doesn't exist
-        logger.warn(`Booking ${bookingId} already processed or not found`);
-        
-        // Check if it's already paid (idempotent - return existing tickets)
-        const existingBooking = await prisma.booking.findUnique({
-          where: { id: bookingId },
-          include: {
-            tickets: true,
-          },
-        });
-
-        if (existingBooking?.status === 'PAID' && existingBooking.tickets.length > 0) {
-          logger.info(`Booking ${bookingId} already paid, returning existing tickets`);
-          return existingBooking.tickets.map(ticket => ({
-            id: ticket.id,
-            uniqueCode: ticket.uniqueCode,
-            isRedeemed: ticket.isRedeemed,
-          }));
-        }
-
-        throw new AppError(
-          `Booking ${bookingId} not found or already processed`,
-          404
-        );
-      }
-
-      // Step 2: Fetch the updated booking with ticket tier
-      const booking = await prisma.booking.findUnique({
+      // Step 1: Check if booking exists and get details (before transaction)
+      const existingBooking = await prisma.booking.findUnique({
         where: { id: bookingId },
         include: {
           ticketTier: true,
+          tickets: true,
         },
       });
 
-      if (!booking) {
-        throw new AppError(`Booking ${bookingId} not found after update`, 500);
+      // Idempotency check: If already paid, return existing tickets
+      if (existingBooking?.status === 'PAID' && existingBooking.tickets.length > 0) {
+        logger.info(`Booking ${bookingId} already paid, returning existing tickets`);
+        return existingBooking.tickets.map(ticket => ({
+          id: ticket.id,
+          uniqueCode: ticket.uniqueCode,
+          isRedeemed: ticket.isRedeemed,
+        }));
       }
 
-      // Step 3: Generate tickets based on quantity
+      if (!existingBooking) {
+        throw new AppError(`Booking ${bookingId} not found`, 404);
+      }
+
+      // Check if booking is in a processable state
+      if (existingBooking.status !== 'PENDING' && existingBooking.status !== 'AWAITING_PAYMENT') {
+        throw new AppError(
+          `Booking ${bookingId} is in ${existingBooking.status} state and cannot be completed`,
+          400
+        );
+      }
+
+      const tierId = existingBooking.ticketTierId;
+      const quantity = existingBooking.quantity;
+
+      // Step 2: Generate unique ticket codes (before transaction - safe as we check uniqueness)
       const ticketsToCreate: Prisma.TicketCreateManyInput[] = [];
       
-      for (let i = 0; i < booking.quantity; i++) {
+      for (let i = 0; i < quantity; i++) {
         let uniqueCode: string;
         let isUnique = false;
         let attempts = 0;
@@ -203,40 +182,75 @@ class TicketService {
 
         ticketsToCreate.push({
           uniqueCode: uniqueCode!,
-          bookingId: booking.id,
+          bookingId: bookingId,
           isRedeemed: false,
         });
       }
 
-      // Step 4: Create all tickets in a single transaction
-      const createResult = await prisma.ticket.createMany({
-        data: ticketsToCreate,
-      });
-
-      logger.info(
-        `Generated ${createResult.count} tickets for booking ${bookingId}`
-      );
-
-      // Step 5: Fetch and return created tickets
-      const createdTickets = await prisma.ticket.findMany({
-        where: {
-          bookingId: booking.id,
-          uniqueCode: {
-            in: ticketsToCreate.map(t => t.uniqueCode),
+      // Step 3: Atomic transaction - Update booking, increment quantitySold, create tickets
+      const result = await prisma.$transaction(async (tx) => {
+        // Update booking status (with optimistic locking)
+        const updateResult = await tx.booking.updateMany({
+          where: {
+            id: bookingId,
+            status: {
+              in: ['PENDING', 'AWAITING_PAYMENT'],
+            },
           },
-        },
-        select: {
-          id: true,
-          uniqueCode: true,
-          isRedeemed: true,
-        },
+          data: {
+            status: 'PAID',
+            paymentReference: paymentRef,
+            ...(paymentPhone && { paymentPhoneNumber: paymentPhone }),
+          },
+        });
+
+        if (updateResult.count === 0) {
+          throw new AppError(
+            `Booking ${bookingId} was already processed by another transaction`,
+            409
+          );
+        }
+
+        // Increment quantitySold for the ticket tier
+        await tx.ticketTier.update({
+          where: { id: tierId },
+          data: {
+            quantitySold: {
+              increment: quantity,
+            },
+          },
+        });
+
+        // Create all tickets
+        await tx.ticket.createMany({
+          data: ticketsToCreate,
+        });
+
+        logger.info(
+          `Transaction completed: Updated booking ${bookingId} to PAID, incremented quantitySold by ${quantity} for tier ${tierId}, created ${ticketsToCreate.length} tickets`
+        );
+
+        // Return created tickets
+        return await tx.ticket.findMany({
+          where: {
+            bookingId: bookingId,
+            uniqueCode: {
+              in: ticketsToCreate.map(t => t.uniqueCode),
+            },
+          },
+          select: {
+            id: true,
+            uniqueCode: true,
+            isRedeemed: true,
+          },
+        });
       });
 
-      // Step 6: Send visual tickets (QR codes) via WhatsApp
+      // Step 4: Send visual tickets (QR codes) via WhatsApp (outside transaction)
       // This is a new booking completion (not idempotent retry), so send images
-      await this.sendTicketImages(bookingId, createdTickets);
+      await this.sendTicketImages(bookingId, result);
 
-      return createdTickets;
+      return result;
     } catch (error) {
       logger.error(`Failed to complete booking ${bookingId}:`, error);
 
@@ -248,6 +262,94 @@ class TicketService {
       const errorMessage = error instanceof Error ? error.message : 'Unknown error';
       throw new AppError(
         `Failed to complete booking: ${errorMessage}`,
+        500
+      );
+    }
+  }
+
+  /**
+   * Cancels a paid booking and decrements quantitySold
+   * Should be called when a booking is refunded or cancelled
+   * Uses transaction to ensure atomicity
+   * @param bookingId - The booking ID to cancel
+   * @param reason - Optional reason for cancellation
+   * @throws AppError if booking not found or not in a cancellable state
+   */
+  async cancelBooking(
+    bookingId: string,
+    reason?: string
+  ): Promise<void> {
+    try {
+      logger.info(`Cancelling booking: bookingId=${bookingId}, reason=${reason || 'N/A'}`);
+
+      // Step 1: Check if booking exists and is in a cancellable state
+      const booking = await prisma.booking.findUnique({
+        where: { id: bookingId },
+        include: {
+          ticketTier: true,
+        },
+      });
+
+      if (!booking) {
+        throw new AppError(`Booking ${bookingId} not found`, 404);
+      }
+
+      // Only allow cancellation of PAID bookings (not already cancelled/failed)
+      if (booking.status !== 'PAID') {
+        throw new AppError(
+          `Booking ${bookingId} is in ${booking.status} state and cannot be cancelled`,
+          400
+        );
+      }
+
+      const tierId = booking.ticketTierId;
+      const quantity = booking.quantity;
+
+      // Step 2: Atomic transaction - Update booking status and decrement quantitySold
+      await prisma.$transaction(async (tx) => {
+        // Update booking status to CANCELLED
+        const updateResult = await tx.booking.updateMany({
+          where: {
+            id: bookingId,
+            status: 'PAID', // Only cancel if still PAID (optimistic locking)
+          },
+          data: {
+            status: 'CANCELLED',
+          },
+        });
+
+        if (updateResult.count === 0) {
+          throw new AppError(
+            `Booking ${bookingId} was already cancelled or modified by another transaction`,
+            409
+          );
+        }
+
+        // Decrement quantitySold for the ticket tier
+        await tx.ticketTier.update({
+          where: { id: tierId },
+          data: {
+            quantitySold: {
+              decrement: quantity,
+            },
+          },
+        });
+
+        logger.info(
+          `Transaction completed: Updated booking ${bookingId} to CANCELLED, decremented quantitySold by ${quantity} for tier ${tierId}`
+        );
+      });
+    } catch (error) {
+      logger.error(`Failed to cancel booking ${bookingId}:`, error);
+
+      if (error instanceof AppError) {
+        throw error;
+      }
+
+      // Wrap unknown errors
+      const errorMessage = error instanceof Error ? error.message : 'Unknown error';
+      throw new AppError(
+        `Failed to cancel booking: ${errorMessage}`,
         500
       );
     }

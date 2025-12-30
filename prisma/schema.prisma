@@ -54,15 +54,16 @@ model Event {
 }
 
 model TicketTier {
-  id        String    @id @default(uuid())
-  name      String
-  price     Decimal   @db.Decimal(10, 2)
-  quantity  Int
-  eventId   String
-  createdAt DateTime  @default(now())
-  updatedAt DateTime  @updatedAt
-  event     Event     @relation(fields: [eventId], references: [id], onDelete: Cascade)
-  bookings  Booking[]
+  id           String    @id @default(uuid())
+  name         String
+  price        Decimal   @db.Decimal(10, 2)
+  quantity     Int       // Total allocation (max capacity)
+  quantitySold Int       @default(0) // Number of tickets sold
+  eventId      String
+  createdAt    DateTime  @default(now())
+  updatedAt    DateTime  @updatedAt
+  event        Event     @relation(fields: [eventId], references: [id], onDelete: Cascade)
+  bookings     Booking[]
 
   @@map("ticket_tiers")
 }
