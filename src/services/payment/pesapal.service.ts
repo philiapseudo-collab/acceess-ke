@@ -31,7 +31,24 @@ class PesaPalService {
     this.baseUrl = process.env.PESAPAL_BASE_URL || 'https://pay.pesapal.com/v3/api';
     this.consumerKey = process.env.PESAPAL_CONSUMER_KEY || '';
     this.consumerSecret = process.env.PESAPAL_CONSUMER_SECRET || '';
-    this.callbackUrl = process.env.PESAPAL_CALLBACK_URL || '';
+    
+    // Try to auto-detect callback URL from environment, fallback to explicit config
+    const explicitCallbackUrl = process.env.PESAPAL_CALLBACK_URL;
+    const railwayPublicDomain = process.env.RAILWAY_PUBLIC_DOMAIN;
+    const railwayServiceUrl = process.env.RAILWAY_SERVICE_URL;
+    
+    if (explicitCallbackUrl) {
+      this.callbackUrl = explicitCallbackUrl;
+    } else if (railwayPublicDomain) {
+      // Railway provides public domain - construct callback URL
+      this.callbackUrl = `https://${railwayPublicDomain}/webhooks/pesapal`;
+    } else if (railwayServiceUrl) {
+      // Railway service URL (might be internal, but try it)
+      this.callbackUrl = `${railwayServiceUrl}/webhooks/pesapal`;
+    } else {
+      // No callback URL available
+      this.callbackUrl = '';
+    }
 
     // Initialize Axios instance (validation happens on first use)
     this.axiosInstance = axios.create({
@@ -58,8 +75,14 @@ class PesaPalService {
     }
 
     if (!this.callbackUrl) {
+      const errorMessage = 
+        'PesaPal callback URL not configured. ' +
+        'Set PESAPAL_CALLBACK_URL environment variable to your webhook endpoint. ' +
+        'Example: https://your-domain.com/webhooks/pesapal ' +
+        '(Railway users: Set PESAPAL_CALLBACK_URL=https://your-app.railway.app/webhooks/pesapal)';
+      
       throw new PaymentError(
-        'PesaPal callback URL not configured. Set PESAPAL_CALLBACK_URL',
+        errorMessage,
         'CONFIG_ERROR',
         'PESAPAL'
       );
