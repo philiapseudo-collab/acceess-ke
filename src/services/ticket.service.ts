@@ -3,6 +3,8 @@ import logger from '../config/logger';
 import { AppError } from '../utils/AppError';
 import { Prisma } from '@prisma/client';
 import crypto from 'crypto';
+import qrCodeService from './assets/qr.service';
+import whatsappService from './whatsapp.service';
 
 /**
  * TicketService handles ticket generation and booking completion
@@ -22,8 +24,81 @@ class TicketService {
   }
 
   /**
+   * Sends visual ticket images (QR codes) to user via WhatsApp
+   * Uses best-effort delivery - logs errors but never throws
+   * @param bookingId - The booking ID
+   * @param tickets - Array of tickets with unique codes
+   */
+  private async sendTicketImages(
+    bookingId: string,
+    tickets: Array<{ id: string; uniqueCode: string; isRedeemed: boolean }>
+  ): Promise<void> {
+    try {
+      // Fetch booking with event details for caption
+      const booking = await prisma.booking.findUnique({
+        where: { id: bookingId },
+        include: {
+          user: true,
+          ticketTier: {
+            include: {
+              event: true,
+            },
+          },
+        },
+      });
+
+      if (!booking) {
+        logger.error(`Cannot send ticket images: Booking ${bookingId} not found`);
+        return;
+      }
+
+      const eventName = booking.ticketTier.event.title;
+      const tierName = booking.ticketTier.name;
+      const userPhone = booking.user.phoneNumber;
+
+      logger.info(`Sending ${tickets.length} ticket images to ${userPhone} for booking ${bookingId}`);
+
+      // Process all tickets in parallel (best effort)
+      const imagePromises = tickets.map(async (ticket, index) => {
+        try {
+          // Generate QR code
+          const qrBuffer = await qrCodeService.generateTicketCode(ticket.uniqueCode);
+
+          // Upload to WhatsApp
+          const mediaId = await whatsappService.uploadMedia(qrBuffer, 'image/png');
+
+          // Send image with caption
+          const caption = `🎟️ ${eventName} - ${tierName}`;
+          await whatsappService.sendImage(userPhone, mediaId, caption);
+
+          logger.info(`Ticket image sent: ${ticket.uniqueCode} (${index + 1}/${tickets.length})`);
+        } catch (error) {
+          // Log error but continue with other tickets (best effort)
+          logger.error(`Failed to send ticket image for ${ticket.uniqueCode}:`, {
+            error: error instanceof Error ? error.message : 'Unknown error',
+            ticketCode: ticket.uniqueCode,
+            bookingId,
+          });
+        }
+      });
+
+      // Wait for all images to complete (or fail)
+      await Promise.all(imagePromises);
+
+      logger.info(`Ticket image delivery completed for booking ${bookingId}`);
+    } catch (error) {
+      // Log error but never throw - ticket generation is already complete
+      logger.error(`Failed to send ticket images for booking ${bookingId}:`, {
+        error: error instanceof Error ? error.message : 'Unknown error',
+        stack: error instanceof Error ? error.stack : undefined,
+      });
+    }
+  }
+
+  /**
    * Completes a booking by marking it as paid and generating tickets
    * Uses optimistic locking to prevent double-processing
+   * Sends visual ticket images (QR codes) via WhatsApp
    * @param bookingId - The booking ID
    * @param paymentRef - Payment reference (invoice ID or order tracking ID)
    * @param paymentPhone - Optional payment phone number from webhook
@@ -156,6 +231,10 @@ class TicketService {
           isRedeemed: true,
         },
       });
+
+      // Step 6: Send visual tickets (QR codes) via WhatsApp
+      // This is a new booking completion (not idempotent retry), so send images
+      await this.sendTicketImages(bookingId, createdTickets);
 
       return createdTickets;
     } catch (error) {

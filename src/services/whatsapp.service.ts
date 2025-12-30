@@ -1,4 +1,5 @@
 import axios, { AxiosInstance, AxiosError } from 'axios';
+import FormData from 'form-data';
 import dotenv from 'dotenv';
 import logger from '../config/logger';
 import { AppError } from '../utils/AppError';
@@ -363,6 +364,158 @@ class WhatsAppService {
       logger.error(`Failed to mark WhatsApp message as read: messageId=${messageId}`, error);
       // Don't throw - marking as read is not critical
       // Log and continue
+    }
+  }
+
+  /**
+   * Uploads media (image, document, etc.) to WhatsApp servers
+   * @param fileBuffer - The file buffer to upload
+   * @param mimeType - MIME type of the file (e.g., 'image/png')
+   * @returns Media ID for use in sendImage or other media messages
+   * @throws AppError if upload fails or validation fails
+   */
+  async uploadMedia(fileBuffer: Buffer, mimeType: string): Promise<string> {
+    // Validate configuration
+    this.validateConfig();
+
+    // Validate inputs
+    if (!fileBuffer || fileBuffer.length === 0) {
+      throw new AppError('File buffer is required for media upload', 400);
+    }
+
+    if (!mimeType) {
+      throw new AppError('MIME type is required for media upload', 400);
+    }
+
+    try {
+      // Create FormData with file
+      const form = new FormData();
+      form.append('messaging_product', 'whatsapp');
+      form.append('file', fileBuffer, {
+        filename: 'ticket.png',
+        contentType: mimeType,
+      });
+
+      // Build media upload URL
+      const uploadUrl = `https://graph.facebook.com/${this.apiVersion}/${this.phoneNumberId}/media`;
+
+      logger.info(`Uploading media to WhatsApp, size=${fileBuffer.length} bytes, type=${mimeType}`);
+
+      // Upload with merged headers (form headers + authorization)
+      const response = await axios.post(uploadUrl, form, {
+        headers: {
+          ...form.getHeaders(),
+          Authorization: `Bearer ${this.accessToken}`,
+        },
+      });
+
+      if (!response.data || !response.data.id) {
+        throw new AppError('WhatsApp API returned no media ID', 500);
+      }
+
+      const mediaId = response.data.id;
+
+      logger.info(`Media uploaded successfully: mediaId=${mediaId}`);
+
+      return mediaId;
+    } catch (error) {
+      logger.error('Media upload failed:', {
+        error: error instanceof Error ? error.message : 'Unknown error',
+        mimeType,
+        bufferSize: fileBuffer.length,
+      });
+
+      // Extract Meta error if available
+      if (axios.isAxiosError(error)) {
+        const axiosError = error as AxiosError<any>;
+        const metaError = axiosError.response?.data?.error;
+
+        if (metaError) {
+          const errorMessage = metaError.message || 'WhatsApp media upload error';
+          const errorType = metaError.type || 'UNKNOWN';
+
+          logger.error('WhatsApp media upload error details:', {
+            code: metaError.code,
+            type: errorType,
+            message: errorMessage,
+          });
+
+          throw new AppError(
+            `WhatsApp media upload failed (${errorType}): ${errorMessage}`,
+            500
+          );
+        }
+      }
+
+      throw new AppError(
+        `Failed to upload media: ${error instanceof Error ? error.message : 'Unknown error'}`,
+        500
+      );
+    }
+  }
+
+  /**
+   * Sends an image message with an uploaded media ID
+   * @param to - Recipient phone number (will be normalized)
+   * @param mediaId - Media ID from uploadMedia()
+   * @param caption - Optional caption for the image
+   * @returns Message ID
+   * @throws AppError if send fails or validation fails
+   */
+  async sendImage(
+    to: string,
+    mediaId: string,
+    caption?: string
+  ): Promise<WaServiceResponse> {
+    try {
+      // Validate configuration
+      this.validateConfig();
+
+      // Validate mediaId
+      if (!mediaId) {
+        throw new AppError('Media ID is required for sending image', 400);
+      }
+
+      // Normalize phone number
+      const normalizedTo = normalizePhoneNumber(to);
+
+      logger.info(`Sending WhatsApp image to ${normalizedTo}, mediaId=${mediaId}`);
+
+      const payload: any = {
+        messaging_product: 'whatsapp',
+        recipient_type: 'individual',
+        to: normalizedTo,
+        type: 'image',
+        image: {
+          id: mediaId,
+        },
+      };
+
+      // Add caption if provided (pass through without truncation)
+      if (caption) {
+        payload.image.caption = caption;
+      }
+
+      const response = await this.sendRequest('/messages', payload);
+
+      if (!response.messages || response.messages.length === 0) {
+        throw new AppError('WhatsApp API returned no message ID', 500);
+      }
+
+      const messageId = response.messages[0].id;
+
+      logger.info(`WhatsApp image sent: messageId=${messageId}`);
+
+      return { messageId };
+    } catch (error) {
+      logger.error(`Failed to send WhatsApp image to ${to}:`, error);
+      if (error instanceof AppError) {
+        throw error;
+      }
+      throw new AppError(
+        `Failed to send WhatsApp image: ${error instanceof Error ? error.message : 'Unknown error'}`,
+        500
+      );
     }
   }
 }
