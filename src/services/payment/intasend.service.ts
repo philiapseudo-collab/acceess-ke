@@ -110,21 +110,86 @@ class IntaSendService {
         invoiceId: String(invoiceId),
         status: String(status),
       };
-    } catch (error) {
-      logger.error('IntaSend STK Push failed:', error);
+    } catch (error: any) {
+      // Log detailed error information
+      logger.error('IntaSend STK Push failed:', {
+        error: error instanceof Error ? {
+          message: error.message,
+          name: error.name,
+          stack: error.stack,
+        } : error,
+        rawError: error,
+      });
 
       // Handle known error types
       if (error instanceof PaymentError) {
         throw error;
       }
 
-      // Wrap unknown errors
-      const errorMessage = error instanceof Error ? error.message : 'Unknown error';
+      // Try to extract error details from IntaSend SDK error
+      let errorMessage = 'Unknown error';
+      let errorCode = 'STK_PUSH_FAILED';
+      let errorDetails: any = error;
+
+      // Check if error has response data
+      if (error?.response) {
+        const responseData = error.response;
+        logger.error('IntaSend Request HTTP Error Code:', responseData.status || responseData.statusCode);
+        
+        // Try to parse error data (might be Buffer, string, or object)
+        let parsedError: any = null;
+        
+        if (Buffer.isBuffer(responseData.data)) {
+          try {
+            parsedError = JSON.parse(responseData.data.toString());
+          } catch (e) {
+            // If parsing fails, try to extract as string
+            parsedError = { raw: responseData.data.toString() };
+          }
+        } else if (typeof responseData.data === 'string') {
+          try {
+            parsedError = JSON.parse(responseData.data);
+          } catch (e) {
+            parsedError = { message: responseData.data };
+          }
+        } else {
+          parsedError = responseData.data;
+        }
+
+        // Extract error message from parsed error
+        if (parsedError) {
+          logger.error('IntaSend Error Response:', JSON.stringify(parsedError, null, 2));
+          
+          // Check for error in different formats
+          if (parsedError.errors && Array.isArray(parsedError.errors) && parsedError.errors.length > 0) {
+            const firstError = parsedError.errors[0];
+            errorMessage = firstError.detail || firstError.message || firstError.code || errorMessage;
+            errorCode = firstError.code || errorCode;
+            
+            // Check for business eligibility error
+            if (errorMessage.includes('not eligible') || errorMessage.includes('eligibility')) {
+              errorCode = 'BUSINESS_NOT_ELIGIBLE';
+              errorMessage = 'Your IntaSend business account is not eligible to process transactions. Please complete your business verification and submit required documents in the IntaSend dashboard.';
+            }
+          } else if (parsedError.message) {
+            errorMessage = parsedError.message;
+          } else if (parsedError.error) {
+            errorMessage = parsedError.error;
+          } else if (parsedError.detail) {
+            errorMessage = parsedError.detail;
+          }
+          
+          errorDetails = parsedError;
+        }
+      } else if (error instanceof Error) {
+        errorMessage = error.message;
+      }
+
       throw new PaymentError(
         `IntaSend STK Push failed: ${errorMessage}`,
-        'STK_PUSH_FAILED',
+        errorCode,
         'INTASEND',
-        error
+        errorDetails
       );
     }
   }
