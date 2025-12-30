@@ -131,17 +131,27 @@ class PesaPalService {
   }
 
   /**
+   * Clears the cached access token (used when token is invalid/expired)
+   */
+  private clearToken(): void {
+    logger.info('Clearing cached PesaPal token');
+    this.token = null;
+    this.tokenExpiry = null;
+  }
+
+  /**
    * Gets or refreshes the PesaPal access token
    * Implements proactive refresh (30 seconds before expiry)
+   * @param forceRefresh - If true, forces a token refresh even if cached token exists
    * @returns Access token
    * @throws PaymentError if authentication fails
    */
-  private async getAccessToken(): Promise<string> {
+  private async getAccessToken(forceRefresh: boolean = false): Promise<string> {
     const now = Date.now();
     const thirtySeconds = 30 * 1000;
 
     // Check if token exists and is still valid (with 30-second buffer)
-    if (this.token && this.tokenExpiry && now < this.tokenExpiry - thirtySeconds) {
+    if (!forceRefresh && this.token && this.tokenExpiry && now < this.tokenExpiry - thirtySeconds) {
       logger.debug('Using cached PesaPal token');
       return this.token;
     }
@@ -214,7 +224,7 @@ class PesaPalService {
       const expiresIn = responseData.expires_in || 3600; // Default to 1 hour if not provided
       this.tokenExpiry = now + expiresIn * 1000;
 
-      logger.info(`PesaPal token refreshed. Expires in ${expiresIn} seconds`);
+      logger.info(`PesaPal token refreshed. Expires in ${expiresIn} seconds (at ${new Date(this.tokenExpiry).toISOString()})`);
 
       return token;
     } catch (error) {
@@ -360,6 +370,12 @@ class PesaPalService {
 
       return this.ipnId;
     } catch (error) {
+      // If we get a 401, the token is invalid - clear it so it gets refreshed on next call
+      if (axios.isAxiosError(error) && error.response?.status === 401) {
+        logger.warn('PesaPal IPN registration returned 401. Clearing cached token.');
+        this.clearToken();
+      }
+
       logger.error('PesaPal IPN registration failed:', error);
 
       if (error instanceof PaymentError) {
@@ -379,10 +395,11 @@ class PesaPalService {
   /**
    * Generates a PesaPal payment link for card payments
    * @param booking - Booking DTO with payment details
+   * @param retryOnAuthFailure - Internal flag for retry logic (default: true)
    * @returns Redirect URL for payment
    * @throws PaymentError if payment link generation fails
    */
-  async getPaymentLink(booking: BookingPaymentDTO): Promise<string> {
+  async getPaymentLink(booking: BookingPaymentDTO, retryOnAuthFailure: boolean = true): Promise<string> {
     try {
       // Validate configuration
       this.validateConfig();
@@ -440,6 +457,15 @@ class PesaPalService {
       // Step 5: Return redirect URL
       return response.data.redirect_url;
     } catch (error) {
+      // Handle 401 Unauthorized errors by clearing token and retrying once
+      if (axios.isAxiosError(error) && error.response?.status === 401 && retryOnAuthFailure) {
+        logger.warn('PesaPal API returned 401 Unauthorized. Clearing cached token and retrying...');
+        this.clearToken();
+        
+        // Retry once with a fresh token
+        return this.getPaymentLink(booking, false);
+      }
+
       logger.error('PesaPal payment link generation failed:', error);
 
       if (error instanceof PaymentError) {
@@ -472,10 +498,11 @@ class PesaPalService {
   /**
    * Gets the transaction status for a PesaPal order
    * @param orderTrackingId - The order tracking ID from PesaPal
+   * @param retryOnAuthFailure - Internal flag for retry logic (default: true)
    * @returns Transaction status response
    * @throws PaymentError if the operation fails
    */
-  async getTransactionStatus(orderTrackingId: string): Promise<any> {
+  async getTransactionStatus(orderTrackingId: string, retryOnAuthFailure: boolean = true): Promise<any> {
     try {
       // Validate configuration
       this.validateConfig();
@@ -500,6 +527,15 @@ class PesaPalService {
 
       return response.data;
     } catch (error) {
+      // Handle 401 Unauthorized errors by clearing token and retrying once
+      if (axios.isAxiosError(error) && error.response?.status === 401 && retryOnAuthFailure) {
+        logger.warn('PesaPal API returned 401 Unauthorized. Clearing cached token and retrying...');
+        this.clearToken();
+        
+        // Retry once with a fresh token
+        return this.getTransactionStatus(orderTrackingId, false);
+      }
+
       logger.error('PesaPal transaction status check failed:', error);
 
       if (error instanceof PaymentError) {
