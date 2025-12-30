@@ -7,9 +7,9 @@ dotenv.config();
 const REDIS_URL = process.env.REDIS_URL || 'redis://localhost:6379';
 
 // Singleton Redis client instance
-// Lazy connection - won't block app startup
+// Eager connection - connects immediately to fail fast if Redis is unreachable
 const redisClient = new Redis(REDIS_URL, {
-  lazyConnect: true, // Don't connect immediately
+  family: 0, // Essential for Railway/Fly.io - enables dual-stack support (IPv4 and IPv6)
   retryStrategy: (times) => {
     // Stop retrying after 5 attempts (to reduce log spam)
     if (times > 5) {
@@ -31,11 +31,11 @@ const redisClient = new Redis(REDIS_URL, {
 });
 
 redisClient.on('connect', () => {
-  logger.info('Redis client connected');
+  logger.info('✅ Redis Connection Established');
 });
 
 redisClient.on('ready', () => {
-  logger.info('Redis client ready');
+  logger.info('✅ Redis client ready');
 });
 
 // Track last error log time to reduce spam
@@ -46,7 +46,7 @@ redisClient.on('error', (err) => {
   const now = Date.now();
   // Only log errors once per minute to reduce spam
   if (now - lastErrorLogTime > ERROR_LOG_INTERVAL) {
-    logger.warn('Redis client error (will retry silently):', err instanceof Error ? err.message : 'Unknown error');
+    logger.error('❌ Redis Error:', err instanceof Error ? err.message : 'Unknown error');
     lastErrorLogTime = now;
   }
 });
